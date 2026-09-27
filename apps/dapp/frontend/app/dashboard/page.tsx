@@ -22,23 +22,20 @@ import {
 } from "lucide-react";
 import { WithdrawModal } from "@/components/vault-action-modals";
 import { cn } from "@/lib/utils";
-import { GuidedTour } from "@/components/onboarding/GuidedTour";
-import { OnboardingWizard } from "@/components/onboarding/OnboardingWizard";
 import { RebalanceSuggestionCard } from "@/components/dashboard/RebalanceSuggestionCard";
-import { profileApi } from "@/lib/api/profile";
 import { useTokenPrices } from "@/hooks/useTokenPrices";
 import { useNetwork } from "@/hooks/useNetwork";
 import { AppShell } from "@/components/app-shell";
 import { useOfflineStatus } from "@/hooks/useOfflineStatus";
+import { LiveValue } from "@/components/live-value";
+import { useWebSocketContext } from "@/components/websocket-provider";
+import { useRelativeAge } from "@/hooks/useRelativeAge";
 import { useLocale, useTranslations } from "@/context/locale-context";
-import { formatDistanceToNow } from "date-fns";
 import { useVaults, type VaultWithPerf } from "@/hooks/useVaults";
-import { useSettlements } from "@/hooks/useSettlements";
 import { useVaultHistory } from "@/hooks/useVaultHistory";
 import {
     SkeletonStatCard,
     SkeletonPositionsTable,
-    SkeletonActivityItem,
 } from "@/components/ui/skeletons";
 // import { usePortfolio } from "@/components/portfolio-provider"; // unused — wallet balance section commented out
 import type { PortfolioPosition } from "@/components/portfolio-provider";
@@ -308,79 +305,6 @@ function PositionsTable({
     );
 }
 
-// ── Recent Activity (settlements) ─────────────────────────────────────────────
-
-const STATUS_LABELS: Record<string, string> = {
-    initiated: "Initiated",
-    liquidity_matched: "Matched",
-    fiat_dispatched: "Dispatched",
-    confirmed: "Confirmed",
-    failed: "Failed",
-};
-
-function ActivityFeed({
-    settlements,
-    isLoading,
-}: {
-    settlements: ReturnType<typeof useSettlements>["settlements"];
-    isLoading: boolean;
-}) {
-
-    if (isLoading) {
-        return (
-            <div className="space-y-2">
-                {[0, 1, 2].map((i) => (
-                    <SkeletonActivityItem key={i} />
-                ))}
-            </div>
-        );
-    }
-
-    if (settlements.length === 0) return null;
-
-    return (
-        <div className="space-y-2">
-            {settlements.slice(0, 5).map((s) => (
-                <div
-                    key={s.id}
-                    className="flex items-center justify-between rounded-xl bg-black/[0.015] dark:bg-white/[0.015] px-5 py-3.5"
-                >
-                    <div className="flex items-center gap-3">
-                        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-black/[0.04] dark:bg-white/[0.04] text-black/40 dark:text-white/40">
-                            <ArrowUpRight className="h-4 w-4" />
-                        </div>
-                        <div>
-                            <p className="text-[14px] text-black dark:text-white">Off-ramp</p>
-                            <p className="mt-0.5 text-[11px] text-black/30 dark:text-white/30">
-                                {s.fiat_currency} · {new Date(s.created_at).toLocaleString()}
-                            </p>
-                        </div>
-                    </div>
-                    <div className="flex items-center gap-4">
-                        <div className="text-right">
-                            <p className="font-mono text-[14px] text-black dark:text-white">
-                                {s.amount} {s.currency}
-                            </p>
-                            <span
-                                className={cn(
-                                    "inline-block mt-0.5 text-[11px] font-medium",
-                                    s.status === "confirmed"
-                                        ? "text-black/40 dark:text-white/40"
-                                        : s.status === "failed"
-                                        ? "text-red-400/70"
-                                        : "text-amber-500/70"
-                                )}
-                            >
-                                {STATUS_LABELS[s.status] ?? s.status}
-                            </span>
-                        </div>
-                    </div>
-                </div>
-            ))}
-        </div>
-    );
-}
-
 // ── Wallet Balance Table ──────────────────────────────────────────────────────
 
 function WalletBalanceTable({
@@ -457,28 +381,31 @@ export default function Dashboard() {
     const router = useRouter();
     const [selectedVault, setSelectedVault] = useState<VaultWithPerf | null>(null);
     const [chartPeriod, setChartPeriod] = useState<ChartPeriod>("1M");
-    const [onboardingOpen, setOnboardingOpen] = useState(false);
     const { isOffline, lastSynced } = useOfflineStatus();
+    const { lastUpdatedAt: wsLastUpdatedAt } = useWebSocketContext();
+
+    // Prefer the socket's own freshness stamp — it is set by the events and
+    // HTTP reconciles that actually produced these numbers. useOfflineStatus
+    // only knows about browser connectivity, which can look fine while the
+    // socket is blackholed.
+    const balanceAsOf = useMemo(
+        () => (wsLastUpdatedAt !== null ? wsLastUpdatedAt : lastSynced?.getTime() ?? null),
+        [wsLastUpdatedAt, lastSynced]
+    );
+
+    // Ticks on a timer rather than formatting during render. Without it the
+    // line freezes at whatever it said when the socket dropped — which is the
+    // one moment it needs to be accurate.
+    const balanceAge = useRelativeAge(balanceAsOf, true, 30_000);
 
     // Live data
     const { vaults, isLoading: vaultsLoading } = useVaults(userId);
-    const { settlements, isLoading: settlementsLoading } = useSettlements(userId);
 
     // Wallet balances still come from portfolio-provider (Horizon direct)
     // Wallet balance section commented out — unused for now
     // const { balances } = usePortfolio();
 
     const positions = useMemo(() => vaults.map(vaultToPosition), [vaults]);
-
-    useEffect(() => {
-        if (!isConnected) return;
-        profileApi
-            .get()
-            .then((p) => {
-                if (!p.onboarding_completed) setOnboardingOpen(true);
-            })
-            .catch(() => {});
-    }, [isConnected]);
 
     useEffect(() => {
         if (!isConnected) router.push("/");
@@ -586,12 +513,14 @@ export default function Dashboard() {
                     ) : (
                         <div>
                             <p className="text-[42px] font-light leading-none text-black dark:text-white tracking-[-0.02em]" aria-live="polite">
-                                {formatCurrency(totalBalanceUsd, "USD")}
+                                <LiveValue label={t("dashboard.totalBalance")}>
+                                    {formatCurrency(totalBalanceUsd, "USD")}
+                                </LiveValue>
                             </p>
                             <p className="mt-2 text-[12px] text-black/35 dark:text-white/35 tracking-wide">{t("dashboard.totalBalance")}</p>
-                            {lastSynced && (
-                                <p className="mt-1.5 text-[11px] text-black/25 dark:text-white/25">
-                                    Last updated {formatDistanceToNow(lastSynced)} ago
+                            {balanceAge && (
+                                <p className="mt-1.5 text-[11px] text-black/25 dark:text-white/25" data-testid="balance-last-updated">
+                                    Last updated {balanceAge}
                                 </p>
                             )}
                         </div>
@@ -705,44 +634,12 @@ export default function Dashboard() {
             </motion.div>
             */}
 
-            {/* ── Recent Activity (settlements) ── */}
-            <motion.div
-                initial={{ opacity: 0, y: 12 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.3, delay: 0.2 }}
-                className="mt-8 rounded-2xl dash-border bg-white dark:bg-[#100F0F]"
-            >
-                <div className="px-8 pt-7">
-                    <h2 className="text-[16px] font-semibold text-black dark:text-white">{t("dashboard.recentActivity")}</h2>
-                </div>
-                <div className="px-8 pb-8 pt-6">
-                    <ActivityFeed
-                        settlements={settlements}
-                        isLoading={settlementsLoading && isAuthenticated}
-                    />
-                    {!settlementsLoading && settlements.length === 0 && (
-                        <div className="flex flex-col items-center justify-center py-10 text-center">
-                            <p className="text-[14px] font-medium text-black/50 dark:text-white/50">No recent activity</p>
-                            <p className="mt-1.5 text-[13px] text-black/30 dark:text-white/30">
-                                Off-ramp settlements will appear here once you initiate a withdrawal.
-                            </p>
-                        </div>
-                    )}
-                </div>
-            </motion.div>
-
             {/* Withdraw modal — uses existing PortfolioPosition shape */}
             <WithdrawModal
                 open={!!selectedVault}
                 onClose={() => setSelectedVault(null)}
                 position={selectedVault ? vaultToPosition(selectedVault) : null}
             />
-            <OnboardingWizard
-                open={onboardingOpen}
-                onClose={() => setOnboardingOpen(false)}
-                onComplete={() => setOnboardingOpen(false)}
-            />
-            <GuidedTour />
         </AppShell>
     );
 }

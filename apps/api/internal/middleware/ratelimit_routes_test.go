@@ -160,12 +160,12 @@ func TestSensitiveRouteLimiterWindowResets(t *testing.T) {
 
 func TestSensitiveUserRouteLimiterPerUser(t *testing.T) {
 	const limit = 1
-	l := NewLimiter(nil, "settlement", limit, time.Second)
-	routes := []RouteMatch{{Method: http.MethodPost, Path: "/api/v1/settlements"}}
+	l := NewLimiter(nil, "goalcreate", limit, time.Second)
+	routes := []RouteMatch{{Method: http.MethodPost, Path: "/api/v1/users/savings-goals"}}
 
 	rules := []RouteRule{{PathPrefix: "/api/v1/"}}
 	chain := Authenticate(testSecret, "", rules, alwaysActiveRevocation)(
-		SensitiveUserRouteLimiter(l, routes, "settlement rate limit exceeded")(ok200),
+		SensitiveUserRouteLimiter(l, routes, "rate limit exceeded")(ok200),
 	)
 
 	mint := func(id string) string {
@@ -177,7 +177,7 @@ func TestSensitiveUserRouteLimiterPerUser(t *testing.T) {
 	}
 
 	send := func(token string) int {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/settlements", nil)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/users/savings-goals", nil)
 		req.RemoteAddr = "10.0.0.7:7777" // same IP for every request
 		req.Header.Set("Authorization", "Bearer "+token)
 		rec := httptest.NewRecorder()
@@ -197,6 +197,26 @@ func TestSensitiveUserRouteLimiterPerUser(t *testing.T) {
 	// user-B shares the IP but must have an independent per-user bucket.
 	if got := send(tokB); got != http.StatusOK {
 		t.Fatalf("user-B first: got %d, want 200 (bucket is per-user, not per-IP)", got)
+	}
+}
+
+func TestMatchPathPatternWildcard(t *testing.T) {
+	routes := []RouteMatch{{Method: http.MethodPost, Path: "/api/v1/vaults/{id}/deposit"}}
+	match := func(method, path string) bool {
+		req := httptest.NewRequest(method, path, nil)
+		return matchesRoute(routes, req)
+	}
+	if !match(http.MethodPost, "/api/v1/vaults/11111111-1111-1111-1111-111111111111/deposit") {
+		t.Fatal("expected wildcard path to match a vault deposit")
+	}
+	if match(http.MethodPost, "/api/v1/vaults/11111111-1111-1111-1111-111111111111/withdraw") {
+		t.Fatal("deposit pattern must not match withdraw")
+	}
+	if match(http.MethodGet, "/api/v1/vaults/11111111-1111-1111-1111-111111111111/deposit") {
+		t.Fatal("POST pattern must not match GET")
+	}
+	if match(http.MethodPost, "/api/v1/vaults") {
+		t.Fatal("must not match a shorter path")
 	}
 }
 

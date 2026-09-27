@@ -19,14 +19,20 @@ import (
 
 // VaultAnalytics holds risk-adjusted performance metrics for a vault.
 type VaultAnalytics struct {
-	VaultID      uuid.UUID `json:"vault_id"`
-	Period       string    `json:"period"`
-	MeanAPY      float64   `json:"mean_apy"`
-	APYVolatility float64  `json:"apy_volatility"`
-	MaxDrawdown  float64   `json:"max_drawdown"`
-	SharpeRatio  float64   `json:"sharpe_ratio"`
-	SortinoRatio float64   `json:"sortino_ratio"`
-	WinRate      float64   `json:"win_rate"`
+	VaultID       uuid.UUID `json:"vault_id"`
+	Period        string    `json:"period"`
+	MeanAPY       float64   `json:"mean_apy"`
+	APYVolatility float64   `json:"apy_volatility"`
+	MaxDrawdown   float64   `json:"max_drawdown"`
+	SharpeRatio   float64   `json:"sharpe_ratio"`
+	SortinoRatio  float64   `json:"sortino_ratio"`
+	WinRate       float64   `json:"win_rate"`
+	// Drift is the vault's current APY-drift snapshot (#613), populated by
+	// the handler on a best-effort basis. Unlike the historical fields
+	// above, it is always computed live (never cached alongside the rest of
+	// this hour-cached response), and is omitted entirely if the drift
+	// detector isn't wired up or the live computation fails.
+	Drift *DriftState `json:"drift,omitempty"`
 }
 
 type analyticsCache struct {
@@ -247,4 +253,3 @@ func winRate(xs []float64) float64 {
 	}
 	return float64(wins) / float64(len(xs))
 }
-

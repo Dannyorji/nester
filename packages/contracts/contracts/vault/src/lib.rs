@@ -7,8 +7,7 @@ pub mod conversion;
 use soroban_sdk::{
     auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
     contract, contractimpl, contracttype, panic_with_error, symbol_short, token, Address, BytesN,
-    Env,
-    IntoVal, Symbol, Val, Vec,
+    Env, IntoVal, Symbol, Val, Vec,
 };
 
 pub use breaker::{BreakerConfig, BreakerStatus, Severity, TripReason};
@@ -121,7 +120,9 @@ const REBALANCE: Symbol = symbol_short!("REBAL");
 /// Emitted when a rebalance skips a source because its adapter failed.
 const SOURCE_SKIPPED: Symbol = symbol_short!("SRC_SKIP");
 const HARVEST: Symbol = symbol_short!("HARVEST");
-const HARVEST_VLT: Symbol = symbol_short!("HARV_VLT");
+/// Time-vested yield report events (issue #803).
+const YIELD_STREAM_STARTED: Symbol = symbol_short!("YLD_STRT");
+const YIELD_RELEASED: Symbol = symbol_short!("YLD_RLSD");
 const MIN_REBALANCE_AMOUNT: i128 = 1;
 const DEFAULT_REBALANCE_COOLDOWN: u64 = 3600;
 /// Default rebalance slippage tolerance: 50 bps (0.5%) — issue #638.
@@ -205,6 +206,25 @@ pub struct WithdrawEventData {
 #[derive(Clone, Debug)]
 pub struct TimestampEventData {
     pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct YieldStreamStartedEventData {
+    /// Total amount now vesting over the stream's window (the new report's
+    /// amount plus any not-yet-vested remainder folded in from a prior
+    /// still-active stream — see `start_or_extend_yield_stream`).
+    pub total: i128,
+    pub started_at: u64,
+    pub ends_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct YieldReleasedEventData {
+    /// Amount moved from the vesting stream into `TotalAssets` this call.
+    pub released: i128,
+    pub remaining: i128,
 }
 
 #[contracttype]
@@ -334,15 +354,6 @@ pub struct HarvestResult {
     pub user: Address,
 }
 
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct VaultHarvestResult {
-    pub total_gross_yield: i128,
-    pub total_fee_collected: i128,
-    pub total_net_yield: i128,
-    pub positions_harvested: u32,
-}
-
 // ---------------------------------------------------------------------------
 // Storage
 // ---------------------------------------------------------------------------
@@ -415,6 +426,13 @@ enum DataKey {
     MaxPriceDeviationBps, // u32 maximum price deviation
     // --- Referral integration (issue #818) ---
     ReferralContract,
+    // --- Time-vested yield reports (issue #803) ---
+    /// The active (or most recently active) yield vesting stream. Absent
+    /// means no stream has ever started.
+    YieldVestingStream,
+    /// Vesting window duration in seconds, admin-configurable. Absent
+    /// defaults to [`DEFAULT_YIELD_VESTING_SECONDS`].
+    YieldVestingPeriodSeconds,
 }
 
 /// Why a penalty was charged (issue #805). `LockBreak` and `WeightDeviation`
@@ -894,12 +912,9 @@ fn circuit_breaker_headroom(env: &Env) -> i128 {
         return 0;
     };
 
-    let threshold = nester_common::fees::mul_div(
-        get_total_assets(env),
-        config.threshold_bps as i128,
-        10_000,
-    )
-    .unwrap_or(0);
+    let threshold =
+        nester_common::fees::mul_div(get_total_assets(env), config.threshold_bps as i128, 10_000)
+            .unwrap_or(0);
     // A zero threshold disables the check in `check_circuit_breaker`.
     if threshold == 0 {
         return i128::MAX;
@@ -1272,6 +1287,199 @@ fn set_user_yield(env: &Env, user: &Address, amount: i128) {
     env.storage()
         .persistent()
         .set(&DataKey::UserYield(user.clone()), &amount);
+}
+
+// ---------------------------------------------------------------------------
+// Time-vested yield reports (issue #803)
+//
+// A reported yield amount is no longer applied to TotalAssets instantly.
+// Instead it vests linearly into TotalAssets over YieldVestingPeriodSeconds,
+// closing the sniping hole: a deposit made immediately before report_yield
+// only captures the sliver of the report that vests during however long the
+// attacker actually holds shares afterward, not the whole amount. A holder
+// who was already present before the report captures proportionally more,
+// simply by virtue of the report continuing to vest while they hold shares
+// and the attacker (if they withdraw quickly) does not.
+//
+// This intentionally keeps yield inside share price (this vault's existing,
+// deeply-entangled model — fee tiers, the emergency-withdrawal preview, and
+// the referral hook all read `redeemable = amount_for_shares(shares)` as the
+// yield signal); vesting is exactly the mechanism the issue itself names as
+// an acceptable alternative to a full accumulator migration when the two are
+// in tension, and is far smaller surgery on a 4000+ line vault contract.
+// ---------------------------------------------------------------------------
+
+/// Default vesting window: how long a single `report_yield` call's amount
+/// takes to fully land in `TotalAssets`. 1 day - long enough that a
+/// snipe-and-immediately-withdraw captures only a small fraction of a
+/// report, short enough that legitimate holders are not kept waiting an
+/// unreasonable time for genuinely-earned yield to become spendable.
+/// Admin-adjustable between 1 hour and 30 days via `set_yield_vesting_period`.
+pub const DEFAULT_YIELD_VESTING_SECONDS: u64 = 24 * 60 * 60;
+pub const MIN_YIELD_VESTING_SECONDS: u64 = 60 * 60;
+pub const MAX_YIELD_VESTING_SECONDS: u64 = 30 * 24 * 60 * 60;
+
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct YieldVestingStream {
+    /// Total amount this stream will release by `ends_at`.
+    pub total: i128,
+    /// Amount already released into `TotalAssets` so far.
+    pub released: i128,
+    pub started_at: u64,
+    pub ends_at: u64,
+}
+
+fn get_yield_vesting_period(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&DataKey::YieldVestingPeriodSeconds)
+        .unwrap_or(DEFAULT_YIELD_VESTING_SECONDS)
+}
+
+fn get_yield_stream(env: &Env) -> Option<YieldVestingStream> {
+    env.storage().instance().get(&DataKey::YieldVestingStream)
+}
+
+fn set_yield_stream(env: &Env, stream: &YieldVestingStream) {
+    env.storage()
+        .instance()
+        .set(&DataKey::YieldVestingStream, stream);
+}
+
+/// Amount of `stream` that has vested by `now` but is not yet reflected in
+/// `stream.released`. Linear vesting: `total * elapsed / duration`, capped
+/// at `total - released` so a stale stream (nobody called anything for a
+/// long time) never over-releases. Rounds down — the vault-favouring
+/// direction — so a fraction of a base unit can be left stranded in the
+/// stream forever rather than ever over-crediting `TotalAssets`.
+fn vested_amount(stream: &YieldVestingStream, now: u64) -> i128 {
+    let remaining = stream.total.saturating_sub(stream.released);
+    if remaining <= 0 || now <= stream.started_at {
+        return 0;
+    }
+    if now >= stream.ends_at {
+        return remaining;
+    }
+    let duration = stream.ends_at.saturating_sub(stream.started_at);
+    if duration == 0 {
+        return remaining;
+    }
+    let elapsed = now - stream.started_at;
+    let total_vested_by_now =
+        nester_common::fees::mul_div(stream.total, elapsed as i128, duration as i128).unwrap_or(0);
+    total_vested_by_now
+        .saturating_sub(stream.released)
+        .clamp(0, remaining)
+}
+
+/// Releases whatever portion of the active yield stream has vested since it
+/// was last touched, adding it to `TotalAssets` exactly like `report_yield`
+/// already did before this stream existed. A no-op (cheap: one storage read)
+/// when there is no active stream or nothing has vested yet.
+///
+/// Must be called before any operation that reads `TotalAssets`/share price
+/// in a way that matters for fairness between holders — deposit, withdraw,
+/// harvest, and report_yield itself (so a new report correctly folds in any
+/// unreleased remainder of the previous one; see
+/// `start_or_extend_yield_stream`) — so no caller can ever observe a share
+/// price that omits yield which has already, in real time, finished vesting.
+fn release_vested_yield(env: &Env) {
+    let Some(mut stream) = get_yield_stream(env) else {
+        return;
+    };
+    let now = env.ledger().timestamp();
+    let to_release = vested_amount(&stream, now);
+    if to_release <= 0 {
+        return;
+    }
+
+    let total_assets = get_total_assets(env);
+    let new_total = total_assets
+        .checked_add(to_release)
+        .unwrap_or_else(|| panic_with_error!(env, ContractError::ArithmeticOverflow));
+    set_total_assets(env, new_total);
+    sync_vault_token_total_assets(env);
+
+    stream.released = stream
+        .released
+        .checked_add(to_release)
+        .unwrap_or_else(|| panic_with_error!(env, ContractError::ArithmeticOverflow));
+    set_yield_stream(env, &stream);
+
+    emit_event(
+        env,
+        VAULT,
+        YIELD_RELEASED,
+        env.current_contract_address(),
+        YieldReleasedEventData {
+            released: to_release,
+            remaining: stream.total.saturating_sub(stream.released),
+        },
+    );
+}
+
+/// Starts a new vesting stream for `amount`, folding in whatever portion of
+/// a still-active previous stream has not yet vested (its `total -
+/// released`, after `release_vested_yield` has already moved the vested
+/// portion out). Folding the remainder in — rather than either discarding it
+/// or leaving two streams running — means a manager who reports yield
+/// frequently cannot reset an in-flight stream to grief holders who were
+/// about to receive it, and cannot accidentally double-pay by starting a
+/// second concurrent stream either.
+///
+/// `amount` may be negative (an impairment): it is applied to `TotalAssets`
+/// immediately rather than vested, mirroring the pre-vesting behaviour for
+/// losses — there is no sniping concern to guard against for a loss (nobody
+/// benefits from front-running a markdown), and vesting a loss would leave
+/// share price overstated for longer than necessary, working against
+/// depositors rather than protecting them.
+fn start_or_extend_yield_stream(env: &Env, amount: i128) {
+    if amount < 0 {
+        let total_assets = get_total_assets(env);
+        let new_total = total_assets
+            .checked_add(amount)
+            .unwrap_or_else(|| panic_with_error!(env, ContractError::ArithmeticOverflow));
+        set_total_assets(env, new_total);
+        sync_vault_token_total_assets(env);
+        return;
+    }
+    if amount == 0 {
+        return;
+    }
+
+    let now = env.ledger().timestamp();
+    let carry_over = get_yield_stream(env)
+        .map(|s| s.total.saturating_sub(s.released))
+        .unwrap_or(0);
+    let total = amount
+        .checked_add(carry_over)
+        .unwrap_or_else(|| panic_with_error!(env, ContractError::ArithmeticOverflow));
+
+    let period = get_yield_vesting_period(env);
+    let ends_at = now
+        .checked_add(period)
+        .unwrap_or_else(|| panic_with_error!(env, ContractError::ArithmeticOverflow));
+
+    let stream = YieldVestingStream {
+        total,
+        released: 0,
+        started_at: now,
+        ends_at,
+    };
+    set_yield_stream(env, &stream);
+
+    emit_event(
+        env,
+        VAULT,
+        YIELD_STREAM_STARTED,
+        env.current_contract_address(),
+        YieldStreamStartedEventData {
+            total,
+            started_at: now,
+            ends_at,
+        },
+    );
 }
 
 fn get_total_reported_yield(env: &Env) -> i128 {
@@ -2109,6 +2317,13 @@ impl VaultContract {
             panic_with_error!(&env, ContractError::Unauthorized);
         }
 
+        // Release whatever has already vested from a prior report before
+        // touching TotalAssets again, so a still-active stream's progress is
+        // captured exactly once (via start_or_extend_yield_stream's
+        // carry-over calculation below) rather than either lost or
+        // double-counted against this new report.
+        release_vested_yield(&env);
+
         let total_assets = get_total_assets(&env);
 
         // Yield-sanity trip (#817): an implausible single report is not
@@ -2119,11 +2334,16 @@ impl VaultContract {
             return;
         }
 
-        let new_total = total_assets
-            .checked_add(amount)
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::ArithmeticOverflow));
-        set_total_assets(&env, new_total);
-        sync_vault_token_total_assets(&env);
+        // Time-vested yield reports (issue #803): a positive report is
+        // spread into TotalAssets linearly over a vesting window rather than
+        // landing all at once, so a deposit made immediately before this
+        // call can only ever capture the sliver that vests during however
+        // long the depositor actually goes on to hold shares afterward — not
+        // the whole report, which is what let a snipe-and-immediately-
+        // withdraw capture disproportionate value under instant application.
+        // A negative amount (an impairment) is still applied immediately;
+        // see start_or_extend_yield_stream's doc comment for why.
+        start_or_extend_yield_stream(&env, amount);
 
         // Track per-caller pending yield and aggregate reported yield for harvest.
         // Only accumulate positive yield; losses (negative amount) reduce
@@ -2158,9 +2378,9 @@ impl VaultContract {
     /// Steps (issue #518):
     ///  1. Calculate accrued yield since last harvest.
     ///  2. Deduct performance fee — only on net positive yield, never on impairment.
-    ///  3. Send the fee portion to the treasury contract.
-    ///  4. Compound the net yield: mint new vault-token shares at the current price
-    ///     and credit them to `user`, then increase TotalAssets accordingly.
+    ///  3. Burn fee-equivalent shares from `user` and send that value to the
+    ///     treasury, preserving the exchange rate for every other holder.
+    ///  4. Leave the net yield compounded in `user`'s remaining shares.
     ///  5. Update `LastHarvestAt` timestamp for `user`.
     ///
     /// Returns a zero-filled `HarvestResult` with `compounded: false` when the
@@ -2174,6 +2394,7 @@ impl VaultContract {
         require_active(&env);
         breaker::require_not_full_halt(&env);
         user.require_auth();
+        release_vested_yield(&env);
 
         let shares = get_shares(&env, &user);
         let redeemable = vault_token_client(&env).amount_for_shares(&shares);
@@ -2211,8 +2432,23 @@ impl VaultContract {
             .checked_sub(performance_fee)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::ArithmeticOverflow));
 
-        // Transfer performance fee to treasury.
+        // Charge the performance fee against the harvesting user only. Yield
+        // is already reflected in TotalAssets and therefore in the value of
+        // the user's existing shares. Minting more shares for that same yield,
+        // or reducing assets without reducing supply, would dilute passive
+        // holders. Burning enough of the user's shares to cover the fee before
+        // transferring it reduces assets and supply together. Rounding the
+        // share charge up assigns any dust to the fee payer, never to holders
+        // who did not harvest.
         if performance_fee > 0 {
+            let fee_shares = conversion::assets_to_shares_up(
+                performance_fee,
+                get_net_total_assets(&env),
+                vault_token_client(&env).total_supply(),
+            )
+            .unwrap_or_else(|e| panic_with_error!(&env, e));
+            let _ = vault_token_client(&env).burn_for_withdrawal(&user, &fee_shares);
+
             let token_address = self::VaultContract::get_token(env.clone());
             transfer_tokens(
                 &env,
@@ -2243,20 +2479,6 @@ impl VaultContract {
             notify_referral_of_fee(&env, &user, performance_fee, principal);
         }
 
-        // Compound net yield: mint new shares for the user at the current price.
-        // The gross yield was already added to TotalAssets by report_yield, so
-        // only the fee reduction above affects TotalAssets here.
-        let new_shares = if net_yield > 0 {
-            let s = vault_token_client(&env).mint_for_deposit(&user, &net_yield);
-            // mint_for_deposit increments vault token's total_assets by net_yield, but
-            // that amount was already tracked by report_yield — sync back to the correct value.
-            sync_vault_token_total_assets(&env);
-            s
-        } else {
-            0
-        };
-        let _ = new_shares; // shares minted internally; user balance updated by vault token
-
         // Reset per-user pending yield to zero and record harvest timestamp.
         set_user_yield(&env, &user, 0);
         set_last_harvest_at(&env, &user, now);
@@ -2282,84 +2504,32 @@ impl VaultContract {
         result
     }
 
-    /// Admin-level vault-wide harvest: reads the aggregate yield reported since
-    /// the last vault harvest, extracts the performance fee portion, transfers
-    /// it to the treasury, and resets the `TotalReportedYield` counter to zero.
-    /// Suitable for periodic treasury collection without enumerating individual
-    /// user positions on-chain (Soroban does not support unbounded iteration).
-    pub fn harvest_vault(env: Env, admin: Address) -> VaultHarvestResult {
-        with_reentrancy_guard(env, |env| Self::harvest_vault_internal(env, admin))
-    }
-
-    fn harvest_vault_internal(env: Env, admin: Address) -> VaultHarvestResult {
-        require_initialized(&env);
-        require_active(&env);
-        admin.require_auth();
-        AccessControl::require_role(&env, &admin, Role::Admin);
-
-        let total_gross_yield = get_total_reported_yield(&env);
-
-        if total_gross_yield == 0 {
-            return VaultHarvestResult {
-                total_gross_yield: 0,
-                total_fee_collected: 0,
-                total_net_yield: 0,
-                positions_harvested: 0,
-            };
-        }
-
-        let config = get_fee_config(&env);
-        let total_fee_collected = nester_common::fees::calculate_performance_fee(
-            total_gross_yield,
-            config.performance_fee_bps,
-        )
-        .unwrap_or_else(|e| panic_with_error!(&env, e));
-
-        let total_net_yield = total_gross_yield
-            .checked_sub(total_fee_collected)
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::ArithmeticOverflow));
-
-        // Transfer performance fee to treasury.
-        if total_fee_collected > 0 {
-            let token_address = self::VaultContract::get_token(env.clone());
-            transfer_tokens(
-                &env,
-                &token_address,
-                &env.current_contract_address(),
-                &config.treasury_address,
-                &total_fee_collected,
-            );
-            invoke_allowed::<()>(
-                &env,
-                &config.treasury_address,
-                &Symbol::new(&env, "receive_fees"),
-                (total_fee_collected,).into_val(&env),
-            );
-            // Reduce TotalAssets by the fee sent to treasury.
-            let total_assets = get_total_assets(&env);
-            let post_fee_assets = total_assets
-                .checked_sub(total_fee_collected)
-                .unwrap_or_else(|| panic_with_error!(&env, ContractError::ArithmeticOverflow));
-            set_total_assets(&env, post_fee_assets);
-            sync_vault_token_total_assets(&env);
-        }
-
-        // Reset aggregate yield counter; per-user UserYield entries are left
-        // in place — they are swept individually by each user's own harvest() call.
-        set_total_reported_yield(&env, 0);
-
-        // positions_harvested reflects the aggregate sweep (one vault-wide sweep).
-        let result = VaultHarvestResult {
-            total_gross_yield,
-            total_fee_collected,
-            total_net_yield,
-            positions_harvested: 1,
-        };
-
-        emit_event(&env, VAULT, HARVEST_VLT, admin, result.clone());
-
-        result
-    }
+    // harvest_vault (admin-level aggregate harvest) was removed in #1159.
+    //
+    // It charged a performance fee on TotalReportedYield and transferred it to
+    // the treasury, then reduced TotalAssets by that fee while leaving total
+    // share supply untouched. Every holder's share price fell by the fee
+    // amount -- the same dilution #1078 removed from the per-user path.
+    //
+    // It was not replaced, because the fee it collected was a *second* charge
+    // on yield the per-user path already bills. harvest() derives gross yield
+    // from share value against recorded principal, and since #1157 it settles
+    // the fee by burning the harvesting user's own shares: assets and supply
+    // fall together, the treasury is paid in full, and no other holder moves.
+    // Running both paths took roughly twice the configured rate on the same
+    // yield, with the extra half taken from holders who never harvested.
+    //
+    // Minting fee-equivalent shares to the treasury was considered and
+    // rejected. A new claim on a fixed pool of assets has to come from
+    // somewhere: minting while the fee leaves the vault lowers the share price
+    // further than the present bug does, and minting while the fee is retained
+    // still moves the price. No share-accounting arrangement lets an aggregate
+    // fee be collected a second time without some holder paying it.
+    //
+    // Nothing outside the contract's own tests called this entrypoint. Treasury
+    // collection continues through per-user harvest(), which needs no unbounded
+    // iteration -- the constraint that motivated an aggregate entrypoint in the
+    // first place.
 
     /// Read-only check: does the live allocation drift exceed the strategy's
     /// `rebalance_threshold_bps`? Returns false when no strategy is set or the
@@ -2870,7 +3040,10 @@ impl VaultContract {
             // that are owed to queued withdrawal requests.
             let current_reserves = get_vault_liquid_reserves(&env);
             let reserved = get_liquid_reserved(&env);
-            let available = current_reserves.saturating_sub(reserved);
+            // Signed saturating subtraction can still produce a negative value.
+            // Clamp exhausted reserves to zero so fee collection is a no-op
+            // instead of attempting an invalid negative token transfer.
+            let available = current_reserves.saturating_sub(reserved).max(0);
             let collectable = fees.min(available);
 
             if collectable == 0 {
@@ -3092,6 +3265,7 @@ impl VaultContract {
 
         user.require_auth();
         accrue_management_fee(&env);
+        release_vested_yield(&env);
 
         // Validate the exchange-rate state before moving funds. In particular,
         // a live share supply backed by zero assets is insolvent and must not
@@ -3253,6 +3427,7 @@ impl VaultContract {
 
         user.require_auth();
         accrue_management_fee(&env);
+        release_vested_yield(&env);
 
         let current_shares = get_shares(&env, &user);
         if shares > current_shares {
@@ -3424,6 +3599,7 @@ impl VaultContract {
         }
 
         user.require_auth();
+        release_vested_yield(&env);
 
         let principal = get_user_principal(&env, &user);
         if principal <= 0 {
@@ -3662,6 +3838,7 @@ impl VaultContract {
 
     fn process_fair_queue_internal(env: Env, _caller: Address, max_entries: u32) -> u32 {
         require_initialized(&env);
+        release_vested_yield(&env);
 
         let available_liquidity = get_vault_liquid_reserves(&env);
         let plan = queue::plan_fills(&env, max_entries, available_liquidity, |shares| {
@@ -3973,6 +4150,41 @@ impl VaultContract {
         gross.saturating_sub(accrued_fees)
     }
 
+    /// Amount of a reported yield still vesting and not yet reflected in
+    /// share price (issue #803) — a pure read, does not release anything.
+    /// Distinct from [`Self::pending_yield`], which reports the vault's
+    /// distributable token-balance surplus, not the vesting stream's
+    /// remaining, not-yet-landed amount.
+    pub fn pending_vesting_yield(env: Env) -> i128 {
+        require_initialized(&env);
+        match get_yield_stream(&env) {
+            Some(stream) => stream.total.saturating_sub(stream.released),
+            None => 0,
+        }
+    }
+
+    /// Returns the vesting window new `report_yield` calls use to spread a
+    /// positive amount into `TotalAssets`. Does not affect a stream already
+    /// in progress.
+    pub fn get_yield_vesting_period(env: Env) -> u64 {
+        require_initialized(&env);
+        get_yield_vesting_period(&env)
+    }
+
+    /// Admin-only: reconfigure the vesting window future `report_yield`
+    /// calls use. Clamped to `[MIN_YIELD_VESTING_SECONDS,
+    /// MAX_YIELD_VESTING_SECONDS]` — a window that is too short reintroduces
+    /// the sniping hole this feature exists to close; one with no ceiling
+    /// could indefinitely delay legitimate yield from ever landing.
+    pub fn set_yield_vesting_period(env: Env, caller: Address, seconds: u64) {
+        caller.require_auth();
+        AccessControl::require_role(&env, &caller, Role::Admin);
+        let clamped = seconds.clamp(MIN_YIELD_VESTING_SECONDS, MAX_YIELD_VESTING_SECONDS);
+        env.storage()
+            .instance()
+            .set(&DataKey::YieldVestingPeriodSeconds, &clamped);
+    }
+
     pub fn withdrawal_fee_preview(env: Env, user: Address, shares: i128) -> WithdrawalFeePreview {
         require_initialized(&env);
         let current_shares = get_shares(&env, &user);
@@ -4141,7 +4353,6 @@ impl VaultContract {
         }
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Tests
