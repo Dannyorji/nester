@@ -1207,6 +1207,30 @@ func (c *Config) validate(loader *envLoader) {
 		loader.addError("WITHDRAWAL_SLIPPAGE_BPS must be between 1 and 300")
 	}
 
+	// Stellar network semantic validation (#1344).
+	//
+	// requiredString/requiredURL already catch absent env vars at load time.
+	// The checks below enforce cross-field invariants and address-format rules
+	// that only make sense once the full config is assembled.
+	if c.stellar.operatorFundedDepositsEnabled {
+		if strings.TrimSpace(c.stellar.operatorSecret) == "" {
+			loader.addError("STELLAR_OPERATOR_SECRET is required when STELLAR_OPERATOR_FUNDED_DEPOSITS_ENABLED is true")
+		}
+		if strings.TrimSpace(c.stellar.operatorAddress) == "" {
+			loader.addError("STELLAR_OPERATOR_ADDRESS is required when STELLAR_OPERATOR_FUNDED_DEPOSITS_ENABLED is true")
+		}
+	}
+	if addr := strings.TrimSpace(c.stellar.operatorAddress); addr != "" {
+		if !isValidStellarAddress(addr) {
+			loader.addError("STELLAR_OPERATOR_ADDRESS is not a valid Stellar public key (expected G... 56 base32 chars)")
+		}
+	}
+	if addr := strings.TrimSpace(c.stellar.stellarUSDCIssuer); addr != "" {
+		if !isValidStellarAddress(addr) {
+			loader.addError("STELLAR_USDC_ISSUER is not a valid Stellar public key (expected G... 56 base32 chars)")
+		}
+	}
+
 	if c.allocation.minWeightPercent < 1 || c.allocation.minWeightPercent > 100 {
 		loader.addError("MIN_ALLOCATION_WEIGHT must be between 1 and 100")
 	}
@@ -1214,6 +1238,23 @@ func (c *Config) validate(loader *envLoader) {
 	if c.tracing.sampleRatio < 0 || c.tracing.sampleRatio > 1 {
 		loader.addError("OTEL_TRACES_SAMPLER_ARG must be between 0 and 1")
 	}
+}
+
+// isValidStellarAddress performs a surface-level format check on a Stellar
+// public address: it must start with 'G', be exactly 56 characters, and
+// consist only of base-32 alphabet characters (A-Z and 2-7).  Full checksum
+// verification would require the stellar/go SDK keypair package; this lighter
+// check is sufficient to catch obvious misconfiguration at startup (#1344).
+func isValidStellarAddress(s string) bool {
+	if len(s) != 56 || s[0] != 'G' {
+		return false
+	}
+	for _, ch := range s[1:] {
+		if !((ch >= 'A' && ch <= 'Z') || (ch >= '2' && ch <= '7')) {
+			return false
+		}
+	}
+	return true
 }
 
 func validateAllowedOrigins(environment string, origins []string, loader *envLoader) {
