@@ -87,23 +87,16 @@ type YieldOpportunitiesResponse struct {
 
 // YieldService aggregates DeFiLlama yield pool data for a given chain.
 type YieldService struct {
-	httpClient   *http.Client
-	defiLlamaURL string
-	cacheMu      sync.Mutex
-	cache        map[string]yieldCacheEntry
-	cacheTTL     time.Duration
-	minTVLUsd    float64
+	httpClient    *http.Client
+	defiLlamaURL  string
+	cacheMu       sync.Mutex
+	cache         map[string]yieldCacheEntry
+	cacheTTL      time.Duration
+	minTVLUsd     float64
 }
 
 const defaultYieldCacheTTL = 5 * time.Minute
 const maxStaleDataAge = 30 * time.Minute
-
-// defiLlamaMaxResponseBytes bounds how much of the /pools body we buffer, so a
-// misbehaving or hostile upstream cannot exhaust memory here. It is generous
-// against the real payload (~11.7MB in Sept 2026) because that response covers
-// every pool on every chain and only grows; the headroom is the point, and
-// exceeding it is reported as our limit rather than as malformed JSON.
-const defiLlamaMaxResponseBytes int64 = 64 * 1024 * 1024
 
 func NewYieldService(defiLlamaURL string) *YieldService {
 	if defiLlamaURL == "" {
@@ -121,15 +114,6 @@ func NewYieldService(defiLlamaURL string) *YieldService {
 		cache:        make(map[string]yieldCacheEntry),
 		cacheTTL:     defaultYieldCacheTTL,
 		minTVLUsd:    minTVL,
-	}
-}
-
-// SetHTTPClient replaces the HTTP client used for outbound calls. It exists so
-// startup can install a metrics-instrumented transport; a nil client is
-// ignored so callers need not branch.
-func (s *YieldService) SetHTTPClient(client *http.Client) {
-	if client != nil {
-		s.httpClient = client
 	}
 }
 
@@ -151,9 +135,7 @@ type defiLlamaPoolsResponse struct {
 // scores them by risk-adjusted APY, and returns the top `limit` results.
 // Falls back to stale cache (up to 30 minutes old) if upstream is unavailable.
 func (s *YieldService) GetYieldOpportunities(ctx context.Context, chain string, limit int) (*YieldOpportunitiesResponse, error) {
-	if limit > 100 {
-		limit = 100
-	}
+	if limit > 100 { limit = 100 }
 	chain = normalizeChain(chain)
 	cacheKey := fmt.Sprintf("%s:%d", chain, limit)
 
@@ -389,23 +371,9 @@ func (s *YieldService) fetchFromUpstream(ctx context.Context, chain string, limi
 		return nil, fmt.Errorf("defillama returned status %d", resp.StatusCode)
 	}
 
-	// The cap bounds how much of a remote body we buffer, but a truncated
-	// read is not a smaller answer — it is a broken one, and json.Unmarshal
-	// reports it as "unexpected end of JSON input", which reads like an
-	// upstream data problem rather than our own limit. Reading one byte past
-	// the cap tells the two apart, so hitting it says so plainly.
-	//
-	// /pools carries every pool on every chain: ~11.7MB as of Sept 2026 and
-	// growing, which is what silently broke this at the previous 10MB cap.
-	body, err := io.ReadAll(io.LimitReader(resp.Body, defiLlamaMaxResponseBytes+1))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
 	if err != nil {
 		return nil, fmt.Errorf("read defillama response: %w", err)
-	}
-	if int64(len(body)) > defiLlamaMaxResponseBytes {
-		return nil, fmt.Errorf(
-			"defillama response exceeds %d bytes; raise defiLlamaMaxResponseBytes",
-			defiLlamaMaxResponseBytes,
-		)
 	}
 
 	var raw defiLlamaPoolsResponse

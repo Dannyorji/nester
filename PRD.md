@@ -7,13 +7,13 @@
 
 ## Project Overview
 
-**Nester** is a decentralized, crypto-first savings & yield investment protocol on Stellar. It automates DeFi yield via Soroban smart vaults, gives users a live portfolio over their positions, and grows deposits with on-chain recurring deposit mandates. The fiat offramp and the AI advisor layer were removed in the September 2026 pivot — the product is the savings/yield/investment core.
+**Nester** is a decentralized savings & liquidity protocol for emerging markets. It automates DeFi yield via Soroban smart vaults on Stellar, and bridges crypto earnings to local fiat through an offramp aggregator. An AI advisor layer (Prometheus, powered by Claude) provides personalized guidance without executing transactions.
 
 **Core value propositions:**
-- Optimized yield (8–15% APY) across multiple DeFi protocols, one deposit
-- Robinhood-grade portfolio visibility with on-chain truth
-- Auto-invest: recurring deposits executed by on-chain mandates
+- Optimized yield (8–15% APY) across multiple DeFi protocols
+- ~3-second crypto-to-fiat settlement (Nigeria first → multi-region)
 - Non-custodial — users retain full asset ownership
+- AI-powered recommendations, never auto-execution
 
 ---
 
@@ -22,9 +22,11 @@
 | Layer | Stack | Status |
 |---|---|---|
 | Smart Contracts | Rust / Soroban (Stellar) | Active |
-| Backend API | Go + PostgreSQL + Redis | Active |
+| Backend API | Go + Chi + PostgreSQL + Redis | Active |
 | Web DApp | Next.js 16 / React 19 / Stellar Freighter | Active |
+| Intelligence Service | Python FastAPI + Claude (Anthropic SDK) | Active |
 | Marketing Website | Next.js + Three.js / GSAP | Active |
+| Mobile App | Flutter (Dart) | Skeleton only |
 
 ---
 
@@ -57,22 +59,28 @@
 - [x] Auth — challenge/verify (Stellar wallet signature + JWT issuance)
 - [x] Vault CRUD — create, get, list, allocations
 - [x] Transaction queries — get by ID, list by vault
-- [x] User profile — get, update
+- [x] Settlement service — initiate, get status, admin patch
+- [x] User profile — get, update, KYC status
 - [x] Admin service — role management, audit logs
+- [x] Bank resolver — Paystack & Flutterwave provider integration
 - [x] Exchange rate oracle (Stellar Horizon)
 - [x] Performance service — APY snapshot history
+- [x] Intelligence relay — proxy to Python Prometheus service
 - [x] Soroban vault chain invoker — smart contract RPC calls
 - [x] WebSocket hub — real-time vault balance updates
 - [x] Health endpoints (`/health`, `/readyz`, `/health/detailed`)
 - [x] CORS, request logging, auth middleware
 - [x] `bootstrap-admin` CLI tool
-- [x] Event indexer (first pass — unblocked by the deterministic replay harness, issue #1051; see `docs/event-indexer-replay.md`)
-- [x] **[B-01]** Event indexer: persist last indexed ledger to DB — cursor is persisted in `system_state` and advanced in the SAME transaction as the balance mutation. Evidence: `TestIntegrationReplay_RestartMidStream`, `TestIntegrationCursorAndBalanceCommitAtomically` *(issue #1051)*
-- [x] **[B-02]** Event indexer: seed `startLedger` from current tip, not 0 — cold start derives `tip - offset`, treating both an absent cursor and migration 025's seeded `'0'` as never-indexed. Evidence: `TestColdStart_DerivesValidLedgerFromTip`, `TestColdStart_NeverRequestsLedgerZero` *(issue #1051)*
-- [x] **[B-03 / indexer idempotency]** Event indexer: balance updates are idempotent — `processed_events.event_id` PRIMARY KEY claimed via `ON CONFLICT DO NOTHING` inside the mutation transaction. Evidence: `TestIntegrationReplay_DuplicateDelivery`, `TestIntegrationReplay_RepeatedFullReplay` *(issue #1051)*
-- [x] Event indexer: logic lives in `internal/stellar/EventPoller.PollEvents`; `startEventIndexer` retains only scheduling and telemetry *(issue #1051)*
+- [x] Event indexer (first pass — **blocked, do not ship**)
+- [ ] **[BLOCKING]** Event indexer: persist last indexed ledger to DB (cursor resets on restart → doubles balances) *(OSS_CLEANUP PR #276)*
+- [ ] **[BLOCKING]** Event indexer: seed `startLedger` from current tip, not 0 (RPC error on first boot) *(OSS_CLEANUP PR #276)*
+- [ ] **[BLOCKING]** Event indexer: make all balance updates idempotent (processed_events table or absolute SET) *(OSS_CLEANUP PR #276)*
+- [ ] Event indexer: move logic into `internal/stellar/EventPoller.PollEvents` (not in main.go) *(OSS_CLEANUP PR #276)*
 - [ ] Event indexer: remove `float64` case in `extractEventAmount` (precision loss on large integers) *(OSS_CLEANUP PR #276)*
 - [ ] Event indexer: unit tests for `applyIndexedEvent` and `extractEventAmount` *(OSS_CLEANUP PR #276)*
+- [ ] **[SECURITY]** `initiateSettlement` — extract `user_id` from JWT, not request body (BOLA) *(OSS_CLEANUP PR #271)*
+- [ ] **[SECURITY]** `GET /settlements/{id}` — add ownership check (return 404 for non-owner, not 403) *(OSS_CLEANUP PR #271)*
+- [ ] **[SECURITY]** `PATCH /settlements/{id}` — return 404 (not 403) for non-owned UUIDs to prevent existence oracle *(OSS_CLEANUP PR #271)*
 - [ ] `GetRoles` — pass raw `uuid.UUID` to pgx, not `id.String()` *(OSS_CLEANUP PR #270)*
 - [ ] `bootstrap-admin` — add `db.Ping()` after `sql.Open()` *(OSS_CLEANUP PR #270)*
 - [ ] `bootstrap-admin` — validate Stellar address format before querying *(OSS_CLEANUP PR #270)*
@@ -85,7 +93,7 @@
 - [x] `002` — vaults table
 - [x] `003` — transactions table
 - [x] `005` — allocations table
-- [x] `006` — settlements table *(dropped by 118 in the pivot)*
+- [x] `006` — settlements table
 - [x] `007` — vault soft-delete (`deleted_at`)
 - [x] `007` — users table update (wallet_address, kyc_status, rename name→display_name, drop email)
 - [x] `008` — vault_transactions table
@@ -104,9 +112,10 @@
 
 ### Dev Environment / Docker
 
-- [x] `docker-compose.yml` — PostgreSQL 16, Redis 7, API, frontend
+- [x] `docker-compose.yml` — PostgreSQL 16, Redis 7, API, frontend, intelligence services
 - [x] API `Dockerfile.dev` with air hot-reload
 - [x] Frontend `Dockerfile.dev`
+- [x] Intelligence `Dockerfile`
 - [x] `Makefile` — `dev`, `dev-logs`, `dev-db`, `dev-down`, `dev-reset` targets
 - [ ] Fix healthcheck endpoint — compose probes `/healthz` but README/router uses `/health` *(OSS_CLEANUP PR #268)*
 - [ ] Add `AUTH_JWT_SECRET` (dev placeholder) to compose API service environment block *(OSS_CLEANUP PR #268)*
@@ -115,37 +124,63 @@
 
 ---
 
-## Phase 2 — Automated Rebalancing + Yield Depth
+## Phase 2 — Automated Rebalancing + LP Aggregator
 
 - [ ] Automated rebalancing engine — triggered by APY threshold drift
+- [ ] LP aggregator contract — finds optimal swap routes across liquidity pools
 - [ ] Rebalancing scheduler in Go API
 - [ ] Slippage protection integration with `preview_withdraw_net` (post-fee)
-- [ ] Real protocol integrations behind `adapter_lending` / `adapter_pool`
+- [ ] Multi-hop swap routing (USDC → XLM → NGN via multiple DEXes)
 
 ---
 
-## Phase 3 — In-App Swaps & Recurring Buys (v2)
+## Phase 3 — Fiat Offramp (Nigeria First)
 
-- [ ] DEX swap routing via the `lp_aggregator` contract (path payments)
-- [ ] Swap UI in the dApp (buy/sell assets from the portfolio)
-- [ ] Recurring token buys on top of the `recurring_deposit` mandate engine
-- [ ] Multi-hop routing and slippage caps surfaced in the UI
+- [x] Paystack resolver (bank list, account resolution)
+- [x] Flutterwave resolver (bank list, account resolution)
+- [x] Settlement initiation + status tracking in API
+- [x] `treasury` contract — refund on failed settlement
+- [x] Bank combobox UI (with suggested chips)
+- [x] Offramp page (crypto → fiat form)
+- [ ] End-to-end live settlement flow (Paystack or Flutterwave — testnet)
+- [ ] Settlement webhook handler (payment provider → API callback)
+- [ ] Retry / fallback logic for failed settlements
+- [ ] Mobile money support (M-Pesa, MTN MoMo)
+- [ ] Card withdrawal support
+- [ ] Multi-currency support beyond NGN
 
 ---
 
-## Phase 4 — Mainstream Onboarding (v3)
+## Phase 4 — AI Intelligence Layer (Prometheus)
 
-- [ ] Third-party fiat onramp widget (MoonPay/Transak-style; provider handles KYC)
-- [ ] Non-custodial MPC embedded wallets alongside external wallets
-- [ ] Curated asset baskets (index-like allocations, one-click buy)
+- [x] FastAPI intelligence service scaffold
+- [x] Anthropic Claude integration (streaming, conversation history)
+- [x] Redis-backed conversation store per user
+- [x] Rate limiting (slowapi)
+- [x] JWT validation on intelligence endpoints
+- [x] HTTP chat endpoint (`POST /intelligence/chat`)
+- [x] WebSocket chat endpoint (`/intelligence/ws`)
+- [x] Structured analysis endpoint (`/analyze`)
+- [x] Prometheus chatbot UI component
+- [x] Prometheus insights cards
+- [x] Market sentiment component
+- [x] Prometheus panel (AI chat sidebar in DApp)
+- [ ] DeFiLlama data integration (live TVL/APY feeds)
+- [ ] CoinGecko price data integration
+- [ ] On-chain vault data passed as context to Claude
+- [ ] Confidence levels on AI recommendations
+- [ ] Portfolio analysis endpoint with structured output
+- [ ] Upgrade Anthropic SDK / model version (currently 0.42.0 — check for newer Claude models)
 
 ---
 
-## Phase 5 — Expansion
+## Phase 5 — Multi-Region Expansion
 
+- [ ] Ghana (GHS) offramp support
+- [ ] Kenya (KES) + M-Pesa integration
+- [ ] South Africa (ZAR) support
 - [ ] Multi-currency vault denomination
-- [ ] Deeper protocol integrations (more yield sources per tier)
-- [ ] Localization beyond en/fr
+- [ ] Regional compliance / KYC per jurisdiction
 
 ---
 
@@ -160,6 +195,7 @@
 - [x] Vault detail — allocations, deposit modal, performance chart
 - [x] Savings page
 - [x] Portfolio page with Recharts visualizations
+- [x] Offramp page — bank selector, amount form
 - [x] Notifications page
 - [x] Stocks page (stub)
 - [x] Animated balance display
@@ -189,6 +225,21 @@
 
 ---
 
+## Mobile App (Flutter)
+
+- [x] Project scaffold (Flutter + Dart)
+- [x] Multi-platform targets (iOS, Android, macOS, Linux, Windows, Web)
+- [ ] Authentication (wallet connect — mobile equivalent of Freighter)
+- [ ] Dashboard screen
+- [ ] Vault management screens
+- [ ] Offramp screen
+- [ ] Portfolio screen
+- [ ] Prometheus AI chat screen
+- [ ] Push notifications
+- [ ] Biometric auth
+
+---
+
 ## CI/CD & Security
 
 - [x] GitHub Actions CI — change detection, conditional jobs
@@ -206,7 +257,7 @@
 - [x] CODEOWNERS — all code owned by @0xDeon
 - [ ] Contract audit — external security review
 - [ ] Load / stress testing plan
-- [ ] Penetration test (money-path + auth endpoints)
+- [ ] Penetration test (settlement + auth endpoints)
 - [ ] SAST integration for TypeScript/Next.js (currently no JS/TS security scanner in CI)
 
 ---
@@ -245,6 +296,18 @@ See **Diagnosis** section below.
 **File:** `apps/api/cmd/api/main.go`
 Stellar `getEvents` rejects ledger sequence `0`. On first boot with no persisted cursor, the indexer fails immediately. Fix: on first boot, seed from the current ledger tip.
 
+### B-03 — BOLA: `initiateSettlement` accepts `user_id` from request body
+**File:** `apps/api/internal/handler/settlement_handler.go`
+Any authenticated user can create a settlement on behalf of any other user by supplying a different `user_id` in the JSON body. Fix: ignore body `user_id`; always extract from `auth.GetUserFromContext`.
+
+### B-04 — `GET /settlements/{id}` has no ownership check
+**File:** `apps/api/internal/handler/settlement_handler.go`
+Any authenticated user can read any settlement by UUID. Enables UUID enumeration as a precondition for the BOLA attack in B-03. Fix: return `404` (not `403`) for settlements the caller doesn't own.
+
+### B-05 — `PATCH /settlements/{id}` ownership 403 confirms settlement existence
+**File:** `apps/api/internal/service/settlement_service.go`
+Non-existent UUIDs → 404; non-owned UUIDs → 403. An attacker can distinguish live from dead settlements. Fix: return `404` for both cases.
+
 ### B-06 — Migration numbering collision (migration runner will corrupt schema)
 **Directory:** `apps/api/migrations/`
 Three pairs of files share the same numeric prefix (`007`, `009`, `010`). Any lexicographic migration runner applies them in undefined order and may apply wrong schema changes or skip others. Fix: renumber colliding migrations consistently before running in production.
@@ -269,31 +332,8 @@ pgx v5 handles `uuid.UUID` natively; passing `.String()` forces implicit server-
 **File:** `packages/contracts/contracts/vault/src/lib.rs`
 Returns `amount_for_shares(shares)` before management, early-withdrawal, and performance fees. Any DApp passing this directly as `min_assets_out` will hit `SlippageExceeded` on every fee-bearing withdrawal. Fix: either add `preview_withdraw_net` that applies fee estimates on-chain, or document explicitly and have the DApp subtract fees.
 
-### B-11 — `float64` precision loss in `extractEventAmount` — RESOLVED
-**File:** `apps/api/internal/stellar/indexer.go`
-
-Resolved in two parts, by two separate changes:
-
-**Parsing (pre-dates issue #1051).** Amounts decode via `UseNumber()` into
-`decimal.Decimal`, so they arrive as `json.Number` and never pass through
-`float64`. The `case float64` branch is a bounds check, not a pure guard: it
-*rejects* values that are non-integral or exceed 2^53 (where precision is
-already lost), and *converts* smaller values via `int64(v)`, which is exact in
-that range. This branch only sees stray `float64` inputs, since the RPC path
-yields `json.Number`.
-
-**Persistence (issue #1051).** Migration `103` widens the vault balance columns
-from `NUMERIC(20,8)` to `NUMERIC(48,8)`. This is the part that was still
-broken: the old type allowed only 12 integer digits, so a 1e18 stroop deposit
-raised `numeric field overflow` and the event was rejected outright. Parsing
-had been correct; storage was not.
-
-Evidence: `TestIntegrationLargeAmountRoundTripsExactly` (end-to-end round-trip
-through the real schema), `TestExtractEventAmount_RejectsUnsafeFloat64`, and
-`TestAmountPathHasNoFloat64` (source-level guard against reintroducing a
-`float64` conversion).
-
-Original finding:
+### B-11 — `float64` precision loss in `extractEventAmount`
+**File:** `apps/api/cmd/api/main.go`
 A `float64` case is handled for Soroban event amounts. `float64` loses precision above 2^53 — Soroban amounts come as strings and can exceed this range. Fix: treat any non-string amount type as unparseable; only accept `string`.
 
 ### B-12 — No migration runner in API startup (new migrations silently skipped in dev)
@@ -330,6 +370,10 @@ The mobile app is Flutter/Dart, not React Native. Misleads contributors looking 
 ### P-06 — Missing `013` migration (gap between `012` and `014`)
 **Directory:** `apps/api/migrations/`
 Migration numbering jumps from `012` to `014`. If this was an intentional deletion, it should be documented. If accidental, the missing migration may have left a schema gap that `014_add_missing_columns` is patching around.
+
+### P-07 — Intelligence service Claude model version not pinned
+**File:** `apps/intelligence/app/services/claude.py`
+If no model ID is pinned, the Anthropic SDK defaults may shift with library upgrades. Pin explicitly to `claude-sonnet-4-6` (or latest) and document the version in config.
 
 ### P-08 — WebSocket connections have no heartbeat / reconnection handling in DApp
 **File:** `apps/dapp/frontend/` (WebSocket client)
@@ -368,11 +412,14 @@ Add a `ping/pong` heartbeat on the WebSocket client, with exponential-backoff re
 ### E-07 — Add SAST for TypeScript to CI pipeline
 GitHub Actions currently scans Go (gosec), Rust (cargo audit), and Python (bandit) but has no static analysis for Next.js/TypeScript. Add `eslint-plugin-security` or Semgrep with a JS/TS ruleset.
 
+### E-08 — Pin Claude model version in intelligence service config
+Explicit `CLAUDE_MODEL=claude-sonnet-4-6` in `.env.example` and `config.py`. Prevents silent model version drift on SDK upgrade.
+
 ### E-09 — Add `system_state` table for operational key-value persistence
 A generic `(key TEXT PRIMARY KEY, value TEXT, updated_at TIMESTAMPTZ)` table would solve both the event indexer cursor (B-01) and any future startup-state needs without adding one-off tables.
 
 ### E-10 — Stocks page implementation
-The `/stocks` route is a stub kept as a teaser for the v2/v3 investing surface AI or integrate a public equities/crypto data feed.
+The `/stocks` route is a stub. Implement with yield-bearing asset suggestions from Prometheus AI or integrate a public equities/crypto data feed.
 
 ### E-11 — Deployment runbook document
 Create `docs/DEPLOYMENT.md` covering: migration steps, re-auth requirement after role migrations, env var checklist, contract deployment sequence, rollback procedure.
@@ -386,3 +433,5 @@ Before hitting the DB: `strings.HasPrefix(wallet, "G") && len(wallet) == 56`. Sa
 ### E-14 — DApp: E2E test suite (Playwright)
 Add Playwright tests for the golden paths: wallet connect → create vault → deposit → view dashboard → initiate offramp.
 
+### E-15 — Expose Prometheus data feeds (DeFiLlama / CoinGecko)
+Wire live APY and market data into the intelligence service context so Claude has current on-chain data when making recommendations, instead of relying solely on training knowledge.

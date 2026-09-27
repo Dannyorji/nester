@@ -62,3 +62,4 @@ pub const MIN_UPGRADE_DELAY_YIELD_REGISTRY: u64 = 172_800;
 pub const MIN_UPGRADE_DELAY_ALLOCATION_STRATEGY: u64 = 172_800;
 /// Mandatory timelock delay for Treasury upgrades (7 days).
 pub const MIN_UPGRADE_DELAY_TREASURY: u64 = 604_800;
+

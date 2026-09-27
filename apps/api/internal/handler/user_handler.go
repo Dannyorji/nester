@@ -18,8 +18,9 @@ import (
 )
 
 type UserHandler struct {
-	service   *service.UserService
-	validator *validator.Validate
+	service        *service.UserService
+	userVaultsSvc  *service.UserVaultsService
+	validator      *validator.Validate
 }
 
 func NewUserHandler(service *service.UserService) *UserHandler {
@@ -27,6 +28,11 @@ func NewUserHandler(service *service.UserService) *UserHandler {
 		service:   service,
 		validator: validator.New(validator.WithRequiredStructEnabled()),
 	}
+}
+
+// SetUserVaultsService wires the intelligence-facing user vaults list.
+func (h *UserHandler) SetUserVaultsService(svc *service.UserVaultsService) {
+	h.userVaultsSvc = svc
 }
 
 type registerUserRequest struct {
@@ -37,8 +43,11 @@ type registerUserRequest struct {
 func (h *UserHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/users", h.registerUser)
 	mux.HandleFunc("GET /api/v1/users/wallet/{address}", h.getUserByWallet)
+	mux.HandleFunc("POST /api/v1/users/kyc/{id}", h.submitKYC)
+	mux.HandleFunc("GET /api/v1/users/kyc/{id}", h.getKYCStatus)
 	mux.HandleFunc("GET /api/v1/users/profile", h.getProfile)
 	mux.HandleFunc("PATCH /api/v1/users/profile", h.updateProfile)
+	mux.HandleFunc("GET /api/v1/user-vaults/{id}", h.listUserVaultsForIntelligence)
 	mux.HandleFunc("GET /api/v1/users/{id}", h.getUserByID)
 }
 
@@ -78,6 +87,28 @@ func (h *UserHandler) getUserByID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response.WriteJSON(w, http.StatusOK, response.OK(model))
+}
+
+func (h *UserHandler) listUserVaultsForIntelligence(w http.ResponseWriter, r *http.Request) {
+	if h.userVaultsSvc == nil {
+		response.WriteJSON(w, http.StatusServiceUnavailable, response.Err(http.StatusServiceUnavailable, "UNAVAILABLE", "user vaults service not configured"))
+		return
+	}
+	idStr := r.PathValue("id")
+	userID, err := uuid.Parse(idStr)
+	if err != nil {
+		response.WriteJSON(w, http.StatusBadRequest, response.ValidationErr("invalid user ID"))
+		return
+	}
+	if !h.authorizeUserAccess(w, r, userID) {
+		return
+	}
+	result, err := h.userVaultsSvc.ListForIntelligence(r.Context(), userID)
+	if err != nil {
+		h.writeDomainError(w, r, err)
+		return
+	}
+	response.WriteJSON(w, http.StatusOK, response.OK(result))
 }
 
 func (h *UserHandler) authorizeUserAccess(w http.ResponseWriter, r *http.Request, userID uuid.UUID) bool {
@@ -173,6 +204,90 @@ func (h *UserHandler) getUserByWallet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response.WriteJSON(w, http.StatusOK, response.OK(model))
+}
+
+func (h *UserHandler) submitKYC(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	userID, err := uuid.Parse(idStr)
+	if err != nil {
+		response.WriteJSON(w, http.StatusBadRequest, response.ValidationErr("invalid user ID"))
+		return
+	}
+
+	if err := r.ParseMultipartForm(10 << 20); err != nil { // 10 MB limit
+		response.WriteJSON(w, http.StatusBadRequest, response.ValidationErr("could not parse multipart form"))
+		return
+	}
+
+	fullName := r.FormValue("full_name")
+	dateOfBirth := r.FormValue("date_of_birth") // ignored for now
+	country := r.FormValue("country") // ignored for now
+	idType := r.FormValue("id_type")
+	idNumber := r.FormValue("id_number")
+
+	if idType == "" || idNumber == "" {
+		response.WriteJSON(w, http.StatusBadRequest, response.ValidationErr("id_type and id_number are required"))
+		return
+	}
+
+	idFrontFile, idFrontHeader, err := r.FormFile("id_front")
+	if err != nil {
+		response.WriteJSON(w, http.StatusBadRequest, response.ValidationErr("id_front is required"))
+		return
+	}
+	defer idFrontFile.Close()
+
+	// In a real implementation we would upload to S3 here.
+	frontKey := "s3://mock-bucket/" + idFrontHeader.Filename
+
+	var backKey *string
+	idBackFile, idBackHeader, err := r.FormFile("id_back")
+	if err == nil {
+		defer idBackFile.Close()
+		bk := "s3://mock-bucket/" + idBackHeader.Filename
+		backKey = &bk
+	}
+
+	_ = fullName
+	_ = dateOfBirth
+	_ = country
+
+	if err := h.service.SubmitKYC(r.Context(), userID, idType, idNumber, frontKey, backKey); err != nil {
+		h.writeDomainError(w, r, err)
+		return
+	}
+
+	response.WriteJSON(w, http.StatusAccepted, response.OK(map[string]string{"status": "pending"}))
+}
+
+func (h *UserHandler) getKYCStatus(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	userID, err := uuid.Parse(idStr)
+	if err != nil {
+		response.WriteJSON(w, http.StatusBadRequest, response.ValidationErr("invalid user ID"))
+		return
+	}
+
+	model, err := h.service.GetUser(r.Context(), userID)
+	if err != nil {
+		h.writeDomainError(w, r, err)
+		return
+	}
+
+	resp := map[string]any{
+		"status": model.KYCStatus,
+	}
+	if model.KYCSubmittedAt != nil {
+		resp["submitted_at"] = model.KYCSubmittedAt
+	}
+	if model.KYCReviewedAt != nil {
+		resp["reviewed_at"] = model.KYCReviewedAt
+	}
+	if model.KYCRejectionReason != nil {
+		resp["rejection_reason"] = model.KYCRejectionReason
+	}
+
+	response.WriteJSON(w, http.StatusOK, response.OK(resp))
 }
 
 func (h *UserHandler) decodeJSON(r *http.Request, destination any) error {

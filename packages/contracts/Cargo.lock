@@ -3,16 +3,6 @@
 version = 4
 
 [[package]]
-name = "adapter-blend-contract"
-version = "0.1.0"
-dependencies = [
- "adapter-lending-contract",
- "nester-common",
- "nester-test-utils",
- "soroban-sdk",
-]
-
-[[package]]
 name = "adapter-lending-contract"
 version = "0.1.0"
 dependencies = [
@@ -25,16 +15,6 @@ dependencies = [
 name = "adapter-pool-contract"
 version = "0.1.0"
 dependencies = [
- "nester-common",
- "nester-test-utils",
- "soroban-sdk",
-]
-
-[[package]]
-name = "adapter-soroswap-contract"
-version = "0.1.0"
-dependencies = [
- "adapter-pool-contract",
  "nester-common",
  "nester-test-utils",
  "soroban-sdk",
@@ -559,18 +539,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07e28edb80900c19c28f1072f2e8aeca7fa06b23cd4169cefe1af5aa3260783f"
 
 [[package]]
-name = "goal-rewards-contract"
-version = "0.1.0"
-dependencies = [
- "nester-access-control",
- "nester-common",
- "nester-test-utils",
- "savings-goal-contract",
- "soroban-sdk",
- "vault-factory-contract",
-]
-
-[[package]]
 name = "group"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -749,7 +717,6 @@ checksum = "13dc2df351e3202783a1fe0d44375f7295ffb4049267b0f3018346dc122a1d94"
 name = "lp_aggregator"
 version = "0.1.0"
 dependencies = [
- "nester-test-utils",
  "soroban-sdk",
 ]
 
@@ -798,12 +765,10 @@ name = "nester-integration-tests"
 version = "0.1.0"
 dependencies = [
  "allocation-strategy-contract",
- "ed25519-dalek",
  "nester-access-control",
  "nester-common",
  "nester-test-utils",
  "proptest",
- "rand 0.8.5",
  "soroban-sdk",
  "treasury-contract",
  "vault-contract",

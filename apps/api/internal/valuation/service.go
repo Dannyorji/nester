@@ -8,7 +8,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/suncrestlabs/nester/apps/api/internal/domain/portfolio"
-	"github.com/suncrestlabs/nester/apps/api/internal/freshness"
 )
 
 // PositionSource lists a user's vault positions in asset units.
@@ -48,13 +47,10 @@ type Service struct {
 	notifier  Notifier
 	logger    *slog.Logger
 	clock     func() time.Time
-	freshness freshness.Reader
 }
 
-// Deps bundles the Service's collaborators. pending, rewards, goals, notifier,
-// Freshness may be nil (treated as empty / no-op). A nil Freshness means every
-// valuation reports StalenessUnknown rather than a fabricated fresh/stale
-// verdict — see portfolio.ClassifyStaleness.
+// Deps bundles the Service's collaborators. pending, rewards, goals, notifier
+// may be nil (treated as empty / no-op).
 type Deps struct {
 	Positions PositionSource
 	Pending   PendingSource
@@ -64,7 +60,6 @@ type Deps struct {
 	Cache     *Cache
 	Notifier  Notifier
 	Logger    *slog.Logger
-	Freshness freshness.Reader
 }
 
 // NewService constructs a Service.
@@ -87,7 +82,6 @@ func NewService(d Deps) *Service {
 		notifier:  d.Notifier,
 		logger:    logger,
 		clock:     time.Now,
-		freshness: d.Freshness,
 	}
 }
 
@@ -141,26 +135,8 @@ func (s *Service) compute(ctx context.Context, userID uuid.UUID) (portfolio.Valu
 	if err != nil {
 		return portfolio.Valuation{}, err
 	}
-	s.applyFreshness(&val)
 	s.cache.Set(userID, val)
 	return val, nil
-}
-
-// applyFreshness stamps val with the current indexer freshness sample. Left
-// at the zero value (AsOfLedger 0, Staleness "") when no freshness reader is
-// configured — ClassifyStaleness's caller here always passes sampled=false in
-// that case, so the field lands on StalenessUnknown rather than a silently
-// wrong "fresh."
-func (s *Service) applyFreshness(val *portfolio.Valuation) {
-	if s.freshness == nil {
-		val.Staleness = portfolio.ClassifyStaleness(false, false)
-		return
-	}
-	snap := s.freshness.Snapshot()
-	val.Staleness = portfolio.ClassifyStaleness(snap.Sampled, snap.Stale)
-	if snap.Sampled {
-		val.AsOfLedger = snap.IndexedLedger
-	}
 }
 
 // Invalidate drops the user's cached valuation and, when a notifier is

@@ -4,7 +4,6 @@ import { useCallback, useEffect, useState } from "react";
 import { ArrowRightLeft, X, Loader2 } from "lucide-react";
 import { vaultsApi, type RebalanceSuggestion } from "@/lib/api/vaults";
 import { cn } from "@/lib/utils";
-import { safeStorage } from "@/lib/storage";
 
 const DISMISS_KEY = "nester_rebalance_dismissed";
 
@@ -25,9 +24,7 @@ export function RebalanceSuggestionCard({ vaultId, vaultName }: Props) {
   const [dismissed, setDismissed] = useState(false);
 
   const load = useCallback(async () => {
-    // #1233: safeStorage never throws — a throwing accessor falls back to
-    // the in-memory map instead of crashing the load callback.
-    if (safeStorage.get<boolean>(dismissKey(vaultId), false)) {
+    if (typeof window !== "undefined" && localStorage.getItem(dismissKey(vaultId))) {
       setDismissed(true);
       setLoading(false);
       return;
@@ -47,7 +44,7 @@ export function RebalanceSuggestionCard({ vaultId, vaultName }: Props) {
   }, [load]);
 
   const handleDismiss = () => {
-    safeStorage.set(dismissKey(vaultId), true);
+    localStorage.setItem(dismissKey(vaultId), "1");
     setDismissed(true);
     setModalOpen(false);
   };

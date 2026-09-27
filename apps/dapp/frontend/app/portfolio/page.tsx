@@ -4,6 +4,7 @@ import { useWallet } from "@/components/wallet-provider";
 import { useAuth } from "@/components/auth-provider";
 import { usePortfolio, type PortfolioPosition } from "@/components/portfolio-provider";
 import { useVaults, type VaultWithPerf } from "@/hooks/useVaults";
+import { useSettlements } from "@/hooks/useSettlements";
 import { AppShell } from "@/components/app-shell";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -24,23 +25,20 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { NETWORKS, DEFAULT_NETWORK } from "@/lib/networks";
-import { readNetworkId } from "@/lib/storageKeys";
 import { TransferModal } from "@/components/vault-action-modals";
 import { WithdrawModal } from "@/components/vault-action-modals";
 import { useTokenPrices } from "@/hooks/useTokenPrices";
 import { useNetwork } from "@/hooks/useNetwork";
 import { YieldComparisonChart, type ProtocolApyPoint, type ProtocolSnapshot } from "@/components/analytics/YieldComparisonChart";
-import { PositionsSkeleton } from "@/components/skeletons/page-skeletons";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function getHorizonUrl(): string {
-    // #1233: readNetworkId routes through safeStorage, so a throwing
-    // accessor (private browsing, full quota) falls back to
-    // DEFAULT_NETWORK's horizonUrl rather than an unguarded read crashing
-    // the page.
-    const saved = readNetworkId();
-    if (saved) return NETWORKS[saved].horizonUrl;
+    if (typeof window !== "undefined") {
+        const saved = localStorage.getItem("nester_network_id");
+        if (saved === "mainnet") return NETWORKS.mainnet.horizonUrl;
+        if (saved === "testnet") return NETWORKS.testnet.horizonUrl;
+    }
     return DEFAULT_NETWORK.horizonUrl;
 }
 
@@ -112,26 +110,23 @@ export default function PortfolioPage() {
     
     // Live API hooks
     const { vaults, isLoading: vaultsLoading } = useVaults(userId ?? undefined);
+    const { settlements, isLoading: settlementsLoading } = useSettlements(userId);
 
     const positions = useMemo(() => {
         return vaults.filter(v => parseFloat(v.current_balance) > 0).map(vaultToPosition);
     }, [vaults]);
 
-    const transactions = useMemo(
-        () =>
-            [] as {
-                id: string;
-                type: string;
-                vaultName: string;
-                asset: string;
-                amount: string;
-                status: "Confirmed" | "Pending" | "Failed";
-                timestamp: string;
-                isOnChain: boolean;
-                txHash: string | undefined;
-            }[],
-        [],
-    );
+    const transactions = useMemo(() => settlements.map((s) => ({
+        id: s.id,
+        type: "Settlement" as const,
+        vaultName: `${s.currency} Settlement`,
+        asset: s.currency,
+        amount: s.amount,
+        status: (s.status === "confirmed" ? "Confirmed" : s.status === "failed" ? "Failed" : "Pending") as "Confirmed" | "Pending" | "Failed",
+        timestamp: s.created_at,
+        isOnChain: false,
+        txHash: undefined as string | undefined,
+    })), [settlements]);
 
     const { prices: tokenPrices } = useTokenPrices();
     const { currentNetwork } = useNetwork();
@@ -371,13 +366,8 @@ export default function PortfolioPage() {
                         animate={{ opacity: 1, y: 0 }}
                         exit={{ opacity: 0, y: -8 }}
                     >
-                        {vaultsLoading ? (
-                            <PositionsSkeleton />
-                        ) : positions.length === 0 ? (
-                            <div
-                                data-testid="positions-empty-state"
-                                className="flex flex-col items-center justify-center py-20 text-center rounded-2xl border border-black/8 dark:border-white/8 bg-white dark:bg-[#100F0F]"
-                            >
+                        {positions.length === 0 ? (
+                            <div className="flex flex-col items-center justify-center py-20 text-center rounded-2xl border border-black/8 dark:border-white/8 bg-white dark:bg-[#100F0F]">
                                 <p className="text-sm text-black/60 dark:text-white/60 font-medium">No positions yet</p>
                                 <p className="mt-1 text-xs text-black/50 dark:text-white/50">
                                     Supply assets to a market to see your positions here.
@@ -452,10 +442,7 @@ export default function PortfolioPage() {
                         exit={{ opacity: 0, y: -8 }}
                     >
                         {recentTx.length === 0 ? (
-                            <div
-                                data-testid="activity-empty-state"
-                                className="flex flex-col items-center justify-center py-20 text-center rounded-2xl border border-black/8 dark:border-white/8 bg-white dark:bg-[#100F0F]"
-                            >
+                            <div className="flex flex-col items-center justify-center py-20 text-center rounded-2xl border border-black/8 dark:border-white/8 bg-white dark:bg-[#100F0F]">
                                 <p className="text-sm text-black/60 dark:text-white/60 font-medium">No activity yet</p>
                                 <p className="mt-1 text-xs text-black/50 dark:text-white/50">
                                     Deposits, withdrawals, and yield events will appear here.

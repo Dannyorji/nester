@@ -9,8 +9,6 @@
  * the /yield-opportunities API via useVaultMarkets.
  */
 
-import { getContractId } from "@/lib/contracts";
-
 export type SupportedAsset = "USDC" | "XLM";
 
 export interface VaultContract {
@@ -26,20 +24,12 @@ export interface VaultContract {
   managementFeePct: number;
   asset: SupportedAsset;
   supportedAssets: SupportedAsset[];
-  /**
-   * Deployed contract address, or null when the environment does not carry one.
-   *
-   * Null rather than "" (#1094): an empty string is indistinguishable from a
-   * real address at the type level, so every consumer silently passed it on to
-   * the transaction builder. Null makes the compiler point at each place that
-   * has to decide what "not deployed" means.
-   */
-  contractAddress: string | null;
-  contractXlmAddress?: string | null;
+  contractAddress: string;
+  contractXlmAddress?: string;
 }
 
-const VAULT_USDC_CONTRACT = getContractId("vault");
-const VAULT_XLM_CONTRACT = getContractId("vaultXlm");
+const VAULT_USDC_CONTRACT = process.env.NEXT_PUBLIC_VAULT_CONTRACT_ID ?? "";
+const VAULT_XLM_CONTRACT = process.env.NEXT_PUBLIC_VAULT_XLM_CONTRACT_ID ?? "";
 
 export const vaultContracts: VaultContract[] = [
   {
@@ -129,36 +119,4 @@ export const vaultContracts: VaultContract[] = [
 
 export function getVaultContractById(id: string): VaultContract | undefined {
   return vaultContracts.find((v) => v.id === id);
-}
-
-/**
- * First deployed vault that settles in `asset`.
- *
- * A vault holds a single currency, so an allocation spanning several assets
- * needs one deposit per asset. Vaults without a contract address are skipped:
- * they cannot take a deposit, and offering them produces a signature prompt
- * that always fails.
- */
-export function getVaultContractByAsset(asset: string): VaultContract | undefined {
-  const wanted = settlementAssetFor(asset);
-  if (!wanted) return undefined;
-  return vaultContracts.find(
-    (v) => v.asset.toUpperCase() === wanted && !!v.contractAddress,
-  );
-}
-
-/**
- * The currency a pool's position actually settles in.
- *
- * Pool symbols are the wrapper token a protocol issues — Gami pays EARNUSDC
- * for a USDC deposit, EARNXLM for XLM — so matching a vault on the raw symbol
- * finds nothing and every pool looks undepositable. Only the underlying is
- * mapped: an unrecognised symbol returns undefined rather than being guessed
- * into the wrong vault.
- */
-export function settlementAssetFor(symbol: string): SupportedAsset | undefined {
-  const s = symbol.toUpperCase();
-  if (s.includes("USDC")) return "USDC";
-  if (s.includes("XLM")) return "XLM";
-  return undefined;
 }

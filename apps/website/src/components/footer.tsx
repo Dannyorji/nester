@@ -10,7 +10,7 @@ const NAV_COMMANDS = [
     cmd: "ls ./protocol",
     items: [
       { name: "Vaults", href: "#" },
-      { name: "Auto-Invest", href: "#" },
+      { name: "Off-Ramp", href: "#" },
       { name: "Governance", href: "#" },
       { name: "Tokenomics", href: "#" },
     ],
@@ -184,8 +184,8 @@ export function Footer() {
                   className="rounded-md opacity-60"
                 />
                 <span className="text-[11px] font-mono text-white/25">
-                  Nester Protocol v1.0.0 — Decentralized savings &amp; yield
-                  on Stellar
+                  Nester Protocol v1.0.0 — Decentralized yield &amp; instant
+                  fiat settlement
                 </span>
               </div>
               <span className="text-[11px] font-mono text-white/15 pl-[30px]">

@@ -7,7 +7,7 @@ import React, { useState, useEffect } from "react";
 export type FilterState = {
   fromDate?: string; // ISO date string (YYYY-MM-DD)
   toDate?: string;
-  types: Record<string, boolean>; // keys: Deposit, Withdrawal, Rebalance, "Yield Earned"
+  types: Record<string, boolean>; // keys: Deposit, Withdrawal, Rebalance, Settlement, "Yield Earned"
   vaultId?: string;
   status: string; // "All", "Confirmed", "Pending", "Failed"
   searchTerm: string;
@@ -24,6 +24,7 @@ const TRANSACTION_TYPES = [
   "Deposit",
   "Withdrawal",
   "Rebalance",
+  "Settlement",
   "Yield Earned",
 ];
 

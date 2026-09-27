@@ -58,7 +58,9 @@ function renderHarvestModal() {
 
   function wrapper({ children }: { children: ReactNode }) {
     return (
-      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+      <QueryClientProvider client={queryClient}>
+        {children}
+      </QueryClientProvider>
     );
   }
 
@@ -69,7 +71,7 @@ function renderHarvestModal() {
       vaultId="vault-1"
       vaultName="USDC Market"
     />,
-    { wrapper },
+    { wrapper }
   );
 }
 
@@ -83,7 +85,7 @@ describe("HarvestModal", () => {
     vi.mocked(vaultsApi.previewHarvest).mockReturnValue(
       new Promise<HarvestPreview>((resolve) => {
         resolvePreview = resolve;
-      }),
+      })
     );
 
     renderHarvestModal();
@@ -114,9 +116,7 @@ describe("HarvestModal", () => {
     renderHarvestModal();
 
     await screen.findByText("Gross Yield");
-    fireEvent.click(
-      screen.getByRole("button", { name: "Continue to Confirmation" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Harvest" }));
     fireEvent.click(screen.getByRole("button", { name: "Confirm Harvest" }));
 
     await waitFor(() => {
@@ -138,7 +138,7 @@ describe("HarvestModal", () => {
       expect(vaultsApi.previewHarvest).toHaveBeenCalledWith("vault-1", false);
     });
     expect(
-      screen.getByText(/net yield will be sent back to your connected wallet/i),
+      screen.getByText(/net yield will be sent back to your connected wallet/i)
     ).toBeInTheDocument();
   });
 
@@ -147,11 +147,7 @@ describe("HarvestModal", () => {
 
     renderHarvestModal();
 
-    expect(
-      await screen.findByText(/impaired vault warning/i),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Continue to Confirmation" }),
-    ).toBeDisabled();
+    expect(await screen.findByText(/impaired vault warning/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Harvest" })).toBeDisabled();
   });
 });

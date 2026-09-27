@@ -3,14 +3,13 @@
 import React from 'react';
 import { Download, FileText, AlertTriangle } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { SkeletonTable, LoadingRegion } from '@/components/ui/skeleton/skeleton';
 
 export interface Transaction {
   id: string;
   timestamp: string; // ISO string
-  type: 'Deposit' | 'Withdrawal' | 'Rebalance' | 'Yield Earned';
+  type: 'Deposit' | 'Withdrawal' | 'Rebalance' | 'Settlement' | 'Yield Earned';
   vaultName: string;
-  amount: string; // exact decimal string from the API, e.g. "123.45" (#1223)
+  amount: number;
   asset: string;
   status: 'Confirmed' | 'Pending' | 'Failed';
   txHash?: string;
@@ -38,22 +37,17 @@ const TransactionTable: React.FC<Props> = ({ transactions, loading, error, onExp
     );
   };
 
-  // The skeleton mirrors the real table so the header and column widths do not
-  // shift once rows arrive.
   if (loading) {
     return (
-      <LoadingRegion
-        label="Loading your transactions"
-        className="overflow-x-auto rounded-lg border border-black/10 dark:border-white/10 bg-white dark:bg-[#100F0F] p-4"
-      >
-        <SkeletonTable rows={6} columns={6} />
-      </LoadingRegion>
+      <div className="flex items-center justify-center py-12 text-gray-500">
+        <AlertTriangle className="mr-2 h-5 w-5" /> Loading transactions…
+      </div>
     );
   }
 
   if (error) {
     return (
-      <div role="alert" data-testid="history-error" className="flex items-center justify-center py-12 text-red-500">
+      <div className="flex items-center justify-center py-12 text-red-500">
         <AlertTriangle className="mr-2 h-5 w-5" /> {error}
       </div>
     );
@@ -61,7 +55,7 @@ const TransactionTable: React.FC<Props> = ({ transactions, loading, error, onExp
 
   if (transactions.length === 0) {
     return (
-      <div data-testid="history-empty-state" className="flex items-center justify-center py-12 text-gray-500">
+      <div className="flex items-center justify-center py-12 text-gray-500">
         No transactions match the selected filters.
       </div>
     );
@@ -87,7 +81,7 @@ const TransactionTable: React.FC<Props> = ({ transactions, loading, error, onExp
               <td className="px-4 py-2 text-sm text-gray-700">{tx.type}</td>
               <td className="px-4 py-2 text-sm text-gray-700">{tx.vaultName}</td>
               <td className="px-4 py-2 font-mono text-sm text-gray-700">
-                {Number(tx.amount).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 8 })} {tx.asset}
+                {tx.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 8 })} {tx.asset}
               </td>
               <td className="px-4 py-2">{renderStatus(tx.status)}</td>
               <td className="px-4 py-2">

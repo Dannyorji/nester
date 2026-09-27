@@ -16,6 +16,7 @@ const NAV_LINKS = [
     { label: "Dashboard", href: "/dashboard" },
     { label: "Vaults", href: "/vaults" },
     { label: "Savings", href: "/savings" },
+    { label: "Offramp", href: "/offramp" },
     { label: "Portfolio", href: "/portfolio" },
 ];
 
@@ -102,7 +103,7 @@ export function Navbar() {
                                     <Link
                                         key={item.label}
                                         href={item.href}
-                                        data-tour={undefined}
+                                        data-tour={item.label === "Offramp" ? "settlements-tab" : undefined}
                                         className={cn(
                                             "text-[15px] font-medium transition-colors relative py-2",
                                             pathname === item.href

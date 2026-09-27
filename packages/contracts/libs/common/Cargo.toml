@@ -8,9 +8,7 @@ publish = false
 crate-type = ["rlib"]
 
 [dependencies]
-# alloc: attestation.rs formats a Symbol into a String to build the canonical
-# payload bytes, which needs alloc::format! and the XDR conversions.
-soroban-sdk = { workspace = true, features = ["alloc"] }
+soroban-sdk = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }

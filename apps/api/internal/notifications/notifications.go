@@ -40,16 +40,26 @@ import (
 type EventType string
 
 const (
+	EventSettlementCompleted       EventType = "settlement_completed"
+	EventSettlementFailed          EventType = "settlement_failed"
 	EventDepositConfirmed          EventType = "deposit_confirmed"
 	EventYieldMilestone            EventType = "yield_milestone"
 	EventVaultAPYDrop              EventType = "vault_apy_drop"
 	EventVaultPaused               EventType = "vault_paused"
 	EventRebalanceExecuted         EventType = "rebalance_executed"
+	EventKYCApproved               EventType = "kyc_approved"
+	EventKYCRejected               EventType = "kyc_rejected"
 	EventGoalMilestone             EventType = "goal_milestone"
 	EventScheduledDepositCompleted EventType = "scheduled_deposit_completed"
 	EventSavingsStreak             EventType = "savings_streak_milestone"
 	EventProtocolHealthAlert       EventType = "protocol_health_alert"
-	EventSavingsNudge              EventType = "savings_nudge"
+	EventGoalCoaching              EventType = "goal_coaching"
+	// EventFinancialDigest is the periodic (weekly/monthly) personalized
+	// savings narrative (#859). Cadence and opt-out are controlled by
+	// Preferences.DigestCadence rather than a boolean, but delivery still
+	// goes through the same per-channel Allow() gate as every other event.
+	EventFinancialDigest EventType = "financial_digest"
+	EventSavingsNudge    EventType = "savings_nudge"
 	// EventWebhookSubscriptionSuspended fires once when a webhook subscription
 	// crosses webhook.DeadLetterSuspendThreshold consecutive dead-lettered
 	// deliveries and is auto-suspended (#836) — the owner needs to know their
@@ -57,7 +67,22 @@ const (
 	EventWebhookSubscriptionSuspended EventType = "webhook_subscription_suspended"
 )
 
-const ()
+// DigestCadence values accepted for Preferences.DigestCadence.
+const (
+	DigestCadenceOff     = "off"
+	DigestCadenceWeekly  = "weekly"
+	DigestCadenceMonthly = "monthly"
+)
+
+// ValidDigestCadence reports whether cadence is a recognized value.
+func ValidDigestCadence(cadence string) bool {
+	switch cadence {
+	case DigestCadenceOff, DigestCadenceWeekly, DigestCadenceMonthly:
+		return true
+	default:
+		return false
+	}
+}
 
 // Category classifies an EventType for suppressibility policy (#829).
 // Safety notifications always deliver regardless of user preferences or
@@ -79,9 +104,13 @@ const (
 var safetyEvents = map[EventType]bool{
 	EventProtocolHealthAlert: true,
 	EventVaultPaused:         true,
+	EventSettlementFailed:    true,
 }
 
-var promotionalEvents = map[EventType]bool{}
+var promotionalEvents = map[EventType]bool{
+	EventGoalCoaching:    true,
+	EventFinancialDigest: true,
+}
 
 // CategoryFor returns t's suppressibility category.
 func CategoryFor(t EventType) Category {
@@ -107,15 +136,21 @@ const (
 // computes the union of channels per event, then filters by the user's
 // preferences.
 var eventChannelMatrix = map[EventType][]ChannelKind{
+	EventSettlementCompleted:          {ChannelEmail, ChannelWebSocket, ChannelPush},
+	EventSettlementFailed:             {ChannelEmail, ChannelWebSocket, ChannelPush},
 	EventDepositConfirmed:             {ChannelEmail, ChannelWebSocket, ChannelPush},
 	EventYieldMilestone:               {ChannelPush},
 	EventVaultAPYDrop:                 {ChannelEmail, ChannelPush},
 	EventVaultPaused:                  {ChannelEmail, ChannelWebSocket},
 	EventRebalanceExecuted:            {ChannelWebSocket},
+	EventKYCApproved:                  {ChannelEmail},
+	EventKYCRejected:                  {ChannelEmail},
 	EventGoalMilestone:                {ChannelPush},
 	EventScheduledDepositCompleted:    {ChannelEmail, ChannelWebSocket, ChannelPush},
 	EventSavingsStreak:                {ChannelPush},
 	EventProtocolHealthAlert:          {ChannelEmail, ChannelPush, ChannelWebSocket},
+	EventGoalCoaching:                 {ChannelPush},
+	EventFinancialDigest:              {ChannelEmail, ChannelWebSocket, ChannelPush},
 	EventSavingsNudge:                 {ChannelPush, ChannelWebSocket},
 	EventWebhookSubscriptionSuspended: {ChannelEmail, ChannelWebSocket},
 }
@@ -138,6 +173,10 @@ type Preferences struct {
 	Email     bool `json:"email"`
 	WebSocket bool `json:"websocket"`
 	Push      bool `json:"push"`
+	// DigestCadence is one of DigestCadenceOff/Weekly/Monthly (#859). The
+	// digest is delivered on the channels above like any other event; this
+	// field only controls whether/how often it fires at all.
+	DigestCadence string `json:"digest_cadence"`
 }
 
 // DefaultPreferences returns the "everything on" baseline new users get
@@ -145,7 +184,7 @@ type Preferences struct {
 // off so the feature is opt-out, matching every other notification type
 // here, but a user can turn it off entirely via DigestCadenceOff.
 func DefaultPreferences() Preferences {
-	return Preferences{Email: true, WebSocket: true, Push: true}
+	return Preferences{Email: true, WebSocket: true, Push: true, DigestCadence: DigestCadenceMonthly}
 }
 
 // Allow returns whether the given channel is permitted by the preferences.
@@ -170,7 +209,7 @@ func (p Preferences) Allow(c ChannelKind) bool {
 // matching the issue's "promotional off or minimal" guidance.
 func DefaultPreferencesForCategory(c Category) Preferences {
 	if c == CategoryPromotional {
-		return Preferences{Email: false, WebSocket: true, Push: false}
+		return Preferences{Email: false, WebSocket: true, Push: false, DigestCadence: DigestCadenceOff}
 	}
 	return DefaultPreferences()
 }
@@ -562,7 +601,7 @@ func (d *Dispatcher) Send(
 //     never blocks the websocket fan-out, and vice versa (this dispatcher
 //     intentionally delivers to every eligible channel simultaneously
 //     rather than a single preferred channel, since e.g.
-//     EventDepositConfirmed wants email+push+in-app together, not
+//     EventSettlementCompleted wants email+push+in-app together, not
 //     "whichever one works"). Per-channel fallback still applies: if Push
 //     or Email fails, WebSocket is attempted as a live fallback (skipped if
 //     already attempted as part of the normal matrix). Failed Email/Push

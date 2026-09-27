@@ -11,14 +11,12 @@ import {
 } from "../../lib/types/vault-wizard";
 import { AllocationBuilder } from "./AllocationBuilder";
 import { VaultFactory, VaultDeploymentResponse } from "../../lib/stellar/vault-factory";
-import { signTransaction } from "../../lib/stellar/transaction";
 import { 
   ChevronRight, ChevronLeft, CheckCircle2, AlertCircle, 
   Wallet, ShieldCheck, Activity, Check, Copy, ExternalLink, RefreshCw, Sparkles
 } from "lucide-react";
 import clsx from "clsx";
 import Link from "next/link";
-import { useWallet } from "@/components/wallet-provider";
 
 const STEPS = [
   { id: 1, title: "Basics" },
@@ -34,7 +32,6 @@ const VAULT_TYPES: { id: VaultType; title: string; desc: string; icon: ElementTy
 ];
 
 export function CreateVaultWizard() {
-  const wallet = useWallet();
   const [currentStep, setCurrentStep] = useState(1);
   const [data, setData] = useState<WizardVaultData>(INITIAL_WIZARD_DATA);
   const [isDeploying, setIsDeploying] = useState(false);
@@ -42,7 +39,19 @@ export function CreateVaultWizard() {
   const [deployError, setDeployError] = useState("");
   const [successData, setSuccessData] = useState<VaultDeploymentResponse | null>(null);
 
-
+  const openPrometheusRecommendation = () => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.dispatchEvent(
+      new CustomEvent("nester:prometheus-open", {
+        detail: {
+          prompt:
+            "Recommend a vault for me. I want a straightforward recommendation with a clear rationale, using my risk tolerance, savings goal, and time horizon.",
+        },
+      })
+    );
+  };
 
   // Validation
   const canProceed = () => {
@@ -76,23 +85,16 @@ export function CreateVaultWizard() {
   const handleCreate = async () => {
     if (!canProceed()) return;
     
-    // Ensure wallet is connected
-    if (!wallet.isConnected || !wallet.address) {
-      setDeployError("Please connect your Stellar wallet first");
-      return;
-    }
-    
     setIsDeploying(true);
     setDeployError("");
     
     try {
-      setDeployStatus("Preparing transaction...");
+      // Connect mock wallet
+      setDeployStatus("Connecting wallet...");
+      await VaultFactory.connectWallet();
       
-      // Deploy with real wallet signing
-      const response = await VaultFactory.createVault(data, setDeployStatus, {
-        ownerAddress: wallet.address,
-        signTransaction: signTransaction,
-      });
+      // Deploy
+      const response = await VaultFactory.createVault(data, setDeployStatus);
       
       if (response.success) {
         setSuccessData(response);
@@ -115,6 +117,14 @@ export function CreateVaultWizard() {
           <h2 className="text-2xl font-bold text-white mb-1">Vault Basics</h2>
           <p className="text-slate-400">Let&apos;s start with the fundamental details of your new savings vault.</p>
         </div>
+        <button
+          type="button"
+          onClick={openPrometheusRecommendation}
+          className="inline-flex items-center gap-2 self-start rounded-full border border-blue-500/30 bg-blue-500/10 px-4 py-2 text-sm font-medium text-blue-300 transition-colors hover:border-blue-400/50 hover:bg-blue-500/15 hover:text-blue-200"
+        >
+          <Sparkles className="h-4 w-4" />
+          Get recommendation
+        </button>
       </div>
 
       <div className="space-y-4">
@@ -132,11 +142,7 @@ export function CreateVaultWizard() {
         <div>
           <label className="block text-sm font-medium text-slate-300 mb-2">Description (Optional)</label>
           <textarea
-            // ?? "" keeps this controlled. description became optional on
-            // WizardVaultData, and passing undefined to value flips React to
-            // an uncontrolled textarea mid-render — it warns, and the field
-            // stops tracking state.
-            value={data.description ?? ""}
+            value={data.description}
             onChange={(e) => setData({ ...data, description: e.target.value })}
             placeholder="What is the goal of this vault?"
             rows={3}
@@ -516,8 +522,7 @@ export function CreateVaultWizard() {
             ) : (
               <button
                 onClick={handleCreate}
-                disabled={!canProceed() || isDeploying || !wallet.isConnected}
-                title={!wallet.isConnected ? "Please connect your wallet first" : ""}
+                disabled={!canProceed() || isDeploying}
                 className="px-8 py-2.5 bg-linear-to-r from-blue-600 to-emerald-600 hover:from-blue-500 hover:to-emerald-500 text-white rounded-lg font-medium transition-all shadow-lg disabled:opacity-50 disabled:pointer-events-none flex items-center gap-2 relative overflow-hidden group"
               >
                 {isDeploying ? (
@@ -527,7 +532,7 @@ export function CreateVaultWizard() {
                   </>
                 ) : (
                   <>
-                    {!wallet.isConnected ? "Connect Wallet to Deploy" : "Deploy Vault"}
+                    Deploy Vault
                     <div className="absolute inset-0 bg-white/20 translate-y-full group-hover:translate-y-0 transition-transform" />
                   </>
                 )}

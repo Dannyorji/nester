@@ -1,7 +1,7 @@
 "use client";
 
 import { motion } from "framer-motion";
-import type { Transaction } from "@/lib/types";
+import { Transaction } from "@/lib/mock-data";
 import { cn, truncateAddress } from "@/lib/utils";
 import { 
     ArrowUpRight, 

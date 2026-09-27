@@ -1,10 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { useStellarFeeEstimate } from "@/hooks/useStellarFeeEstimate";
-import { useDepositPreview } from "@/hooks/useDepositPreview";
-import { ReportProblemButton } from "@/components/report-problem-button";
 import { NetworkFeeDisplay } from "@/components/stellar/NetworkFeeEstimate";
 import { useTokenPrices } from "@/hooks/useTokenPrices";
 import { motion, AnimatePresence } from "framer-motion";
@@ -12,7 +10,6 @@ import { useForm, Controller } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { validateAmount } from "@/lib/validation";
-import { parseAmountToStroops, formatStroopsToDisplay } from "@/lib/decimal";
 import {
     AlertCircle,
     CheckCircle2,
@@ -36,12 +33,9 @@ import {
     UserRejectedError,
     TransactionFailedError,
     TransactionTimeoutError,
-    NetworkMismatchError,
-    WalletDisconnectedError,
 } from "@/lib/stellar/transaction";
 import { cn } from "@/lib/utils";
 import { type VaultContract as VaultDefinition, type SupportedAsset, vaultContracts as vaultDefinitions, getVaultContractById as getVaultById } from "@/lib/vault-contracts";
-import { requireContractId } from "@/lib/contracts";
 import { useWallet } from "@/components/wallet-provider";
 import { useNetwork } from "@/hooks/useNetwork";
 
@@ -137,7 +131,6 @@ export function DepositModal({
     const [selectedAsset, setSelectedAsset] = useState<SupportedAsset>(
         vault?.supportedAssets?.[0] ?? "USDC"
     );
-    const submittingRef = useRef(false);
 
     // Reset selected asset when vault changes
     const assets = vault?.supportedAssets ?? ["USDC"];
@@ -170,13 +163,7 @@ export function DepositModal({
     });
 
     const amountInput = watch("amount");
-    const amountStroops = useMemo(() => {
-        if (!amountInput || !vault) return null;
-        const result = parseAmountToStroops(amountInput, 6); // USDC has 6 decimals
-        return result.valid ? result.stroops : null;
-    }, [amountInput, vault]);
-
-    const amount = amountStroops ? Number(formatStroopsToDisplay(amountStroops, 6)) : 0;
+    const amount = Number(amountInput) || 0;
     const [showLargeWarning, setShowLargeWarning] = useState(false);
     const { prices: tokenPrices } = useTokenPrices();
 
@@ -186,10 +173,6 @@ export function DepositModal({
             selectedAsset === "XLM"
                 ? vault.contractXlmAddress || vault.contractAddress
                 : vault.contractAddress;
-        // An unconfigured vault has no address to estimate against (#1094).
-        // Previously this passed "" and the estimate failed inside the SDK
-        // with nothing pointing at the missing environment variable.
-        if (!contractId) return null;
         return { walletAddress: address, contractId, amount };
     }, [vault, address, amount, selectedAsset]);
 
@@ -199,19 +182,9 @@ export function DepositModal({
         open && state === "input" && amount > 0
     );
 
-    // Issue #1129: simulated expected shares via the vault's preview_deposit,
-    // instead of assuming a 1:1 amount-to-shares ratio.
-    const { preview: depositPreview, loading: depositPreviewLoading } = useDepositPreview(
-        depositFeeParams,
-        open && state === "input" && amount > 0
-    );
-
     const canSubmit = !!vault && !!address && isValid && amount > 0;
     const estimatedYield = vault ? amount * vault.apy : 0;
-    const sharesReceived =
-        depositPreview?.available && depositPreview.sharesExpected > BigInt(0)
-            ? Number(formatStroopsToDisplay(depositPreview.sharesExpected, 6))
-            : amount;
+    const sharesReceived = amount;
 
     const reset = () => {
         resetForm();
@@ -223,32 +196,21 @@ export function DepositModal({
     };
 
     const processDeposit = async () => {
-        if (!vault || !address || !canSubmit || submittingRef.current) return;
-        submittingRef.current = true;
+        if (!vault || !address || !canSubmit) return;
 
         setError("");
         setState("confirming");
         setShowLargeWarning(false);
 
         try {
-            // Refuse to build a deposit against an unconfigured vault (#1094).
-            // requireContractId throws naming the exact environment variable,
-            // and the catch below surfaces that message — previously this
-            // passed "" straight into the transaction builder.
-            const contractId =
-                (selectedAsset === "XLM"
-                    ? vault.contractXlmAddress || vault.contractAddress
-                    : vault.contractAddress) ??
-                requireContractId(selectedAsset === "XLM" ? "vaultXlm" : "vault");
+            const contractId = selectedAsset === "XLM"
+                ? (vault.contractXlmAddress || vault.contractAddress)
+                : vault.contractAddress;
 
             const { xdr } = await buildDepositTransaction({
                 walletAddress: address,
                 contractId,
-                // Pass the exact stroop value. Routing through the display
-                // float and letting the builder do Math.round(x * 1e7)
-                // reintroduces the precision loss this parsing work exists
-                // to remove.
-                amount: amountStroops ?? BigInt(0),
+                amount,
             });
             const signedXdr = await signTransaction(xdr);
 
@@ -271,10 +233,6 @@ export function DepositModal({
         } catch (err) {
             if (err instanceof UserRejectedError) {
                 setError("You cancelled the transaction. No funds were moved.");
-            } else if (err instanceof NetworkMismatchError) {
-                setError(err.message);
-            } else if (err instanceof WalletDisconnectedError) {
-                setError(err.message);
             } else if (err instanceof TransactionFailedError) {
                 setError(`Transaction failed on-chain: ${err.reason}`);
             } else if (err instanceof TransactionTimeoutError) {
@@ -283,8 +241,6 @@ export function DepositModal({
                 setError(err instanceof Error ? err.message : "Deposit failed");
             }
             setState("error");
-        } finally {
-            submittingRef.current = false;
         }
     };
 
@@ -540,7 +496,9 @@ export function DepositModal({
                                             <ExternalLink className="h-3.5 w-3.5" />
                                         </Link>
                                         <span className="inline-flex items-center rounded-full border border-emerald-200 bg-white dark:bg-[#100F0F] px-3 py-2 text-xs text-emerald-700">
-                                            Wallet signature captured
+                                            {receipt.walletPopupUsed
+                                                ? "Wallet signature captured"
+                                                : "Mock signature used"}
                                         </span>
                                     </div>
                                 </div>
@@ -550,7 +508,10 @@ export function DepositModal({
                                         <ShieldCheck className="mt-0.5 h-4 w-4 text-emerald-600" />
                                         <div className="space-y-2 text-sm text-muted-foreground">
                                             <p>
-                                                Your wallet will prompt you to sign a Soroban transaction. Review the details carefully before approving.
+                                                This flow uses a mock Soroban transaction envelope until the live vault contracts are ready on testnet.
+                                            </p>
+                                            <p>
+                                                If your wallet supports signing this mock transaction, you will still get a real wallet popup before the simulated confirmation step.
                                             </p>
                                         </div>
                                     </div>
@@ -562,12 +523,6 @@ export function DepositModal({
                                     <div className="flex items-start gap-2">
                                         <AlertCircle className="mt-0.5 h-4 w-4" />
                                         <span>{error}</span>
-                                    </div>
-                                    <div className="mt-2">
-                                        <ReportProblemButton
-                                            lastError={error}
-                                            lastTransactionHash={receipt?.txHash}
-                                        />
                                     </div>
                                 </div>
                             )}
@@ -660,13 +615,7 @@ export function WithdrawModal({
     });
 
     const amountInput = watch("amount");
-    const amountStroops = useMemo(() => {
-        if (!amountInput || !position) return null;
-        const result = parseAmountToStroops(amountInput, 6); // USDC has 6 decimals
-        return result.valid ? result.stroops : null;
-    }, [amountInput, position]);
-
-    const amount = amountStroops ? Number(formatStroopsToDisplay(amountStroops, 6)) : 0;
+    const amount = Number(amountInput) || 0;
     const [showLargeWarning, setShowLargeWarning] = useState(false);
     const [state, setState] = useState<ActionState>("input");
     const [error, setError] = useState("");
@@ -705,11 +654,6 @@ export function WithdrawModal({
         open && state === "input" && amount > 0
     );
 
-    // Guards double submission. A ref rather than render state: a fast second
-    // click or an Enter keypress fires before React has re-rendered with the
-    // disabled button, so state alone does not prevent a duplicate send.
-    const submittingRef = useRef(false);
-
     const canSubmit =
         !!position &&
         !!address &&
@@ -727,8 +671,7 @@ export function WithdrawModal({
     };
 
     const processWithdrawal = async () => {
-        if (!position || !address || !quote || !canSubmit || submittingRef.current) return;
-        submittingRef.current = true;
+        if (!position || !address || !quote || !canSubmit) return;
 
         setError("");
         setState("confirming");
@@ -773,10 +716,6 @@ export function WithdrawModal({
         } catch (err) {
             if (err instanceof UserRejectedError) {
                 setError("You cancelled the transaction. No funds were moved.");
-            } else if (err instanceof NetworkMismatchError) {
-                setError(err.message);
-            } else if (err instanceof WalletDisconnectedError) {
-                setError(err.message);
             } else if (err instanceof TransactionFailedError) {
                 setError(`Transaction failed on-chain: ${err.reason}`);
             } else if (err instanceof TransactionTimeoutError) {
@@ -785,8 +724,6 @@ export function WithdrawModal({
                 setError(err instanceof Error ? err.message : "Withdrawal failed");
             }
             setState("error");
-        } finally {
-            submittingRef.current = false;
         }
     };
 
@@ -1072,24 +1009,12 @@ export function TransferModal({
     });
 
     const amount = parseFloat(watch("amount") || "0");
-    const amountStroops = useMemo(() => {
-        const amountStr = watch("amount") || "0";
-        if (!amountStr || parseFloat(amountStr) <= 0 || !position) return null;
-        const result = parseAmountToStroops(amountStr, 6); // USDC has 6 decimals
-        return result.valid ? result.stroops : null;
-    }, [watch("amount"), position]);
-
-    const finalAmount = amountStroops ? Number(formatStroopsToDisplay(amountStroops, 6)) : 0;
-
-    // See the note in DepositModal: guards against a duplicate submit that
-    // render state cannot catch.
-    const submittingRef = useRef(false);
     const canSubmit =
-        !isNaN(finalAmount) &&
-        finalAmount > 0 &&
+        !isNaN(amount) &&
+        amount > 0 &&
         selectedVault !== null &&
         position !== null &&
-        finalAmount <= position.currentValue;
+        amount <= position.currentValue;
 
     function reset() {
         resetForm();
@@ -1101,10 +1026,9 @@ export function TransferModal({
     }
 
     const handleTransfer = handleSubmit(async ({ amount: rawAmount }) => {
-        if (!position || !selectedVault || submittingRef.current) return;
+        if (!position || !selectedVault) return;
         const amt = parseFloat(rawAmount);
         if (isNaN(amt) || amt <= 0) return;
-        submittingRef.current = true;
 
         setError(null);
         setState("confirming");
@@ -1159,8 +1083,6 @@ export function TransferModal({
             } else {
                 setError(err instanceof Error ? err.message : "Transfer failed. Please try again.");
             }
-        } finally {
-            submittingRef.current = false;
         }
     });
 
@@ -1342,7 +1264,7 @@ export function TransferModal({
                                             <ExternalLink className="h-3.5 w-3.5" />
                                         </Link>
                                         <span className="inline-flex items-center rounded-full border border-emerald-200 bg-white dark:bg-[#100F0F] px-3 py-2 text-xs text-emerald-700">
-                                            {"Wallet signature captured"}
+                                            {receipt.walletPopupUsed ? "Wallet signature captured" : "Mock signature used"}
                                         </span>
                                     </div>
                                 </div>
