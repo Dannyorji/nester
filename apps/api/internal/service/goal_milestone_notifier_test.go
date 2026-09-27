@@ -48,6 +48,5 @@ func TestDispatcherGoalMilestoneNotifier_NilDispatcherNoOp(t *testing.T) {
 		uuid.New(),
 		savingsgoal.SavingsGoal{Description: "Test"},
 		25,
-		"savings_goal:x:milestone:25",
 	)
 }

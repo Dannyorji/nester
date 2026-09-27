@@ -12,12 +12,9 @@ import {
   TrendingUp,
 } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
-import { LoadingRegion } from "@/components/ui/skeleton/skeleton";
 import { useWallet } from "@/components/wallet-provider";
 import { useYields } from "@/hooks/useYields";
-import { AllocationComposer } from "@/components/yields/AllocationComposer";
-import { DepositModal } from "@/components/vault/depositModal";
-import { useVaultFilters } from "@/hooks/use-vault-filters";
+import { YieldDepositDrawer } from "@/components/yields/YieldDepositDrawer";
 import {
   addYieldBookmark,
   fetchYieldBookmarks,
@@ -157,10 +154,6 @@ export default function YieldsPage() {
   const [riskFilter, setRiskFilter] = useState<RiskTier>("all");
   const [bookmarks, setBookmarks] = useState<Set<string>>(new Set());
   const [depositPool, setDepositPool] = useState<YieldPool | null>(null);
-  const [mode, setMode] = useState<"browse" | "allocate">("browse");
-  // The vault markets built from the same yield data /vaults renders; the
-  // deposit modal needs a full Vault, keyed by pool id.
-  const { filteredAndSorted: vaultMarkets } = useVaultFilters();
 
   useEffect(() => {
     if (!isConnected || !getStoredToken()) {
@@ -211,7 +204,7 @@ export default function YieldsPage() {
           <div>
             <h1 className="text-2xl font-semibold text-black dark:text-white tracking-tight">Yield Opportunities</h1>
             <p className="mt-1 text-sm text-black/55 dark:text-white/55">
-              Browse DeFi protocols on Stellar, or split a deposit across several of them.
+              Browse DeFi protocols on Stellar and deposit into your savings goals.
             </p>
           </div>
           <div className="flex items-center gap-3">
@@ -234,26 +227,6 @@ export default function YieldsPage() {
           </div>
         </div>
 
-        <div className="mb-5 inline-flex rounded-xl border border-black/10 dark:border-white/10 p-1">
-          {(["browse", "allocate"] as const).map((m) => (
-            <button
-              key={m}
-              type="button"
-              onClick={() => setMode(m)}
-              aria-pressed={mode === m}
-              className={cn(
-                "rounded-lg px-4 py-1.5 text-xs font-semibold transition-colors",
-                mode === m
-                  ? "bg-black dark:bg-blue-600 text-white"
-                  : "text-black/55 dark:text-white/55 hover:text-black dark:hover:text-white"
-              )}
-            >
-              {m === "browse" ? "Browse pools" : "Build allocation"}
-            </button>
-          ))}
-        </div>
-
-        {mode === "browse" && (
         <div className="mb-6 flex flex-wrap items-center gap-2">
           {RISK_TABS.map((tab) => (
             <button
@@ -271,29 +244,13 @@ export default function YieldsPage() {
             </button>
           ))}
         </div>
-        )}
 
-        {mode === "allocate" ? (
-          <AllocationComposer
-            pools={pools}
-            onDeposit={(byAsset, chosen) => {
-              // A vault settles one currency, so the first asset is funded
-              // here and the composer has already told the user the split
-              // lands as one deposit per asset.
-              const firstAsset = Object.keys(byAsset)[0];
-              const pool = chosen.find((p) => p.symbol === firstAsset) ?? chosen[0];
-              if (pool) setDepositPool(pool);
-            }}
-          />
-        ) : isLoading ? (
-          <LoadingRegion
-            label="Loading yield opportunities"
-            className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3"
-          >
+        {isLoading ? (
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {Array.from({ length: 6 }).map((_, i) => (
               <CardSkeleton key={i} />
             ))}
-          </LoadingRegion>
+          </div>
         ) : isError ? (
           <div className="flex flex-col items-center justify-center gap-3 rounded-2xl border border-black/8 dark:border-white/8 bg-white dark:bg-[#100F0F] py-16 text-center">
             <AlertTriangle className="h-6 w-6 text-black/25 dark:text-white/25" />
@@ -336,15 +293,7 @@ export default function YieldsPage() {
         )}
       </div>
 
-      <DepositModal
-        open={!!depositPool}
-        onClose={() => setDepositPool(null)}
-        vault={
-          depositPool
-            ? (vaultMarkets.find((v) => v.id === depositPool.pool) ?? null)
-            : null
-        }
-      />
+      <YieldDepositDrawer pool={depositPool} onClose={() => setDepositPool(null)} />
     </AppShell>
   );
 }

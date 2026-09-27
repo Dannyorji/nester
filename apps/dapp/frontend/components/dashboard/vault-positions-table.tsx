@@ -1,7 +1,7 @@
 "use client";
 
 import { motion } from "framer-motion";
-import type { VaultPosition, RiskTier } from "@/lib/types";
+import { VaultPosition, RiskTier } from "@/lib/mock-data";
 import { cn } from "@/lib/utils";
 import Link from 'next/link';
 import { ExternalLink, Plus, Minus } from "lucide-react";

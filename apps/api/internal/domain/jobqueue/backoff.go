@@ -52,9 +52,7 @@ func backoffDuration(cfg BackoffConfig, attempt int, rng *rand.Rand) time.Durati
 	if rng != nil {
 		jittered = rng.Float64() * capNanos
 	} else {
-		// Retry backoff jitter. Predicting it lets an attacker anticipate when
-		// a job retries, which grants no capability (nester#1035, G404).
-		jittered = rand.Float64() * capNanos // #nosec G404 -- retry backoff jitter, not security-sensitive
+		jittered = rand.Float64() * capNanos //nolint:gosec // jitter, not security-sensitive
 	}
 	return time.Duration(jittered)
 }

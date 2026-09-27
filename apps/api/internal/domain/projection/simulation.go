@@ -255,11 +255,7 @@ func RunMonteCarloSimulation(p MonteCarloParams) MonteCarloResult {
 		n = MinPathCount
 	}
 
-	// Deliberately seeded and deliberately reproducible: this is a Monte Carlo
-	// yield projection, and an identical seed must produce an identical
-	// forecast so results can be audited and compared. A CSPRNG would defeat
-	// that requirement and protects nothing here (nester#1035, G404).
-	rng := rand.New(rand.NewSource(p.Seed)) // #nosec G404 -- reproducible simulation, not a security decision
+	rng := rand.New(rand.NewSource(p.Seed))
 
 	meanAnnual := p.ExpectedAPY.InexactFloat64()
 	stdAnnual := p.APYStdDev.InexactFloat64()
@@ -489,7 +485,5 @@ func DeriveSeed(parts ...string) int64 {
 	// math/rand.NewSource accepts any int64 but a stable non-negative value
 	// is friendlier to log/debug output.
 	v := binary.BigEndian.Uint64(sum[:8]) &^ (1 << 63)
-	// The sign bit is masked off immediately above, so v is at most 2^63-1 and
-	// the conversion is exact (nester#1035, G115).
-	return int64(v) // #nosec G115 -- sign bit masked above, so the value fits int64
+	return int64(v)
 }

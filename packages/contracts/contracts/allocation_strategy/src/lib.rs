@@ -316,7 +316,7 @@ impl AllocationStrategyContract {
         operator.require_auth();
 
         if !AccessControl::has_role(&env, &operator, Role::Operator) {
-            panic_with_error!(&env, ContractError::Unauthorized);
+            panic!("Caller is not an authorized operator");
         }
 
         // Call the inner compute directly to avoid a second require_auth for the same address.

@@ -2,10 +2,6 @@ import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { ConnectWallet } from "@/components/connect-wallet";
 
-vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: vi.fn() }),
-}));
-
 const mockConnect = vi.fn();
 const mockDisconnect = vi.fn();
 
@@ -29,6 +25,9 @@ vi.mock("@/components/portfolio-provider", () => ({
   }),
 }));
 
+vi.mock("@/hooks/useOnboarding", () => ({
+  useOnboarding: () => ({ completeStep: vi.fn() }),
+}));
 
 vi.mock("@/components/notifications-provider", () => ({
   useNotifications: () => ({ addNotification: vi.fn() }),
@@ -39,25 +38,15 @@ vi.mock("@/hooks/useNetwork", () => ({
 }));
 
 describe("ConnectWallet", () => {
-  // The disconnected screen deliberately shows one Connect button and no
-  // wallet list: a first-time visitor should not be handed a grid of wallets
-  // they may not have installed. The list is one click away.
-  it("shows a single connect action when disconnected", () => {
+  it("shows wallet connect options when disconnected", () => {
     render(<ConnectWallet />);
-    expect(screen.getByRole("button", { name: /^Connect$/ })).toBeInTheDocument();
-    expect(screen.queryByText("Freighter")).not.toBeInTheDocument();
-  });
-
-  it("reveals the wallet list after the connect action is used", () => {
-    render(<ConnectWallet />);
-    fireEvent.click(screen.getByRole("button", { name: /^Connect$/ }));
+    expect(screen.getByText(/connect your stellar wallet/i)).toBeInTheDocument();
     expect(screen.getByText("Freighter")).toBeInTheDocument();
   });
 
   it("calls connect when wallet is selected", async () => {
     mockConnect.mockResolvedValue(undefined);
     render(<ConnectWallet />);
-    fireEvent.click(screen.getByRole("button", { name: /^Connect$/ }));
     fireEvent.click(screen.getByText("Freighter"));
     expect(mockConnect).toHaveBeenCalledWith("freighter");
   });

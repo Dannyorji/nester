@@ -21,8 +21,7 @@ func TestApplyIndexedEvent_Deposit_ProcessesOnce(t *testing.T) {
 		EventType:  "deposit",
 		Ledger:     123,
 		Data: map[string]any{
-			// Stroops, as the contract emits them: 10.25 asset units.
-			"amount": "102500000",
+			"amount": "10.25",
 		},
 	}
 
@@ -69,7 +68,7 @@ func TestApplyIndexedEvent_DuplicateEvent_IsSkipped(t *testing.T) {
 }
 
 func TestExtractEventAmount_JSONNumber(t *testing.T) {
-	amount, ok := extractEventAmountStroops(indexedEvent{
+	amount, ok := extractEventAmount(indexedEvent{
 		Data: map[string]any{
 			"amount": json.Number("123456789012345678901234567890"),
 		},
@@ -84,27 +83,27 @@ func TestExtractEventAmount_LargeAmountPrecision(t *testing.T) {
 
 	t.Run("json.Number preserves precision", func(t *testing.T) {
 		ev := indexedEvent{Data: map[string]any{"amount": json.Number(bigStroops)}}
-		got, ok := extractEventAmountStroops(ev)
+		got, ok := extractEventAmount(ev)
 		assert.True(t, ok)
 		assert.Equal(t, bigStroops, got.String())
 	})
 
 	t.Run("string preserves precision", func(t *testing.T) {
 		ev := indexedEvent{Data: map[string]any{"value": bigStroops}}
-		got, ok := extractEventAmountStroops(ev)
+		got, ok := extractEventAmount(ev)
 		assert.True(t, ok)
 		assert.Equal(t, bigStroops, got.String())
 	})
 
 	t.Run("float64 above 2^53 is rejected instead of silently truncated", func(t *testing.T) {
 		ev := indexedEvent{Data: map[string]any{"amount": float64(1e18)}}
-		_, ok := extractEventAmountStroops(ev)
+		_, ok := extractEventAmount(ev)
 		assert.False(t, ok)
 	})
 
 	t.Run("safe float64 integer is still accepted", func(t *testing.T) {
 		ev := indexedEvent{Data: map[string]any{"amount": float64(1500)}}
-		got, ok := extractEventAmountStroops(ev)
+		got, ok := extractEventAmount(ev)
 		assert.True(t, ok)
 		assert.Equal(t, "1500", got.String())
 	})

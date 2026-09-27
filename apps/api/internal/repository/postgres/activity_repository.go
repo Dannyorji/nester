@@ -23,8 +23,9 @@ func NewActivityRepository(db *sql.DB) *ActivityRepository {
 }
 
 // List returns one page of the unified activity feed for userID: deposits,
-// withdrawals, and rebalances from vault_transactions, and yield harvests
-// from yield_harvests, merged and ordered by created_at. vault_transactions.type='harvest' rows are deliberately
+// withdrawals, and rebalances from vault_transactions, settlements from
+// settlements, and yield harvests from yield_harvests, merged and ordered by
+// created_at. vault_transactions.type='harvest' rows are deliberately
 // excluded — the same harvest event is already represented via
 // yield_harvests, and including both would double-count it.
 func (r *ActivityRepository) List(ctx context.Context, userID uuid.UUID, filter activity.ListFilter) (items []activity.Item, nextCursor, prevCursor string, err error) {
@@ -55,14 +56,9 @@ func (r *ActivityRepository) List(ctx context.Context, userID uuid.UUID, filter 
 		args = append(args, keysetArgs...)
 	}
 
-	// Each arm projects user_id: buildActivityWhere filters the unioned feed
-	// by it, and a CTE column that is not projected cannot be referenced in
-	// the outer WHERE. Without it every call failed with "column user_id
-	// does not exist". The per-arm $1 predicates stay so each source table
-	// is narrowed before the union rather than after.
 	query := fmt.Sprintf(`
 		WITH activity_feed AS (
-			SELECT vt.id, vt.user_id, vt.type AS type, vt.amount, v.currency,
+			SELECT vt.id, vt.type AS type, vt.amount, v.currency,
 			       'completed'::text AS status, vt.created_at,
 			       vt.vault_id, COALESCE(v.name, v.currency || ' Vault') AS vault_name,
 			       COALESCE(vt.transaction_hash, '') AS ref, vt.search_vector AS search_vector
@@ -72,7 +68,21 @@ func (r *ActivityRepository) List(ctx context.Context, userID uuid.UUID, filter 
 
 			UNION ALL
 
-			SELECT yh.id, yh.user_id, 'yield_earned' AS type, yh.amount, yh.currency,
+			SELECT s.id, 'settlement' AS type, s.amount, s.currency,
+			       CASE s.status
+			           WHEN 'confirmed' THEN 'completed'
+			           WHEN 'failed' THEN 'failed'
+			           ELSE 'pending'
+			       END AS status,
+			       s.created_at, s.vault_id, COALESCE(v.name, v.currency || ' Vault') AS vault_name,
+			       ''::text AS ref, s.search_vector AS search_vector
+			  FROM settlements s
+			  JOIN vaults v ON v.id = s.vault_id
+			 WHERE s.user_id = $1
+
+			UNION ALL
+
+			SELECT yh.id, 'yield_earned' AS type, yh.amount, yh.currency,
 			       'completed'::text AS status, yh.harvested_at AS created_at,
 			       yh.vault_id, COALESCE(v.name, v.currency || ' Vault') AS vault_name,
 			       COALESCE(yh.tx_hash, '') AS ref, to_tsvector('english', '') AS search_vector

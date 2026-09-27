@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
 	"sync"
 	"time"
 
@@ -275,21 +274,7 @@ func weightedVaultAPYSkippingUnknown(
 	}
 	avgAPY := weightedSum.Div(totalWeight)
 	// Convert percent back to bps for threshold comparison.
-	//
-	// The intermediate is int64 and is clamped before narrowing to uint32. A
-	// negative APY is possible in principle (a yield source can lose value),
-	// and converting it directly would wrap into a very large positive bps that
-	// the deviation threshold would then read as an enormous yield increase
-	// (nester#1035, G115). A value above uint32 max is equally nonsensical and
-	// is clamped for the same reason.
-	raw := avgAPY.Mul(decimal.NewFromInt(100)).Round(0).IntPart()
-	switch {
-	case raw < 0:
-		raw = 0
-	case raw > math.MaxUint32:
-		raw = math.MaxUint32
-	}
-	bps := uint32(raw) // #nosec G115 -- clamped to [0, MaxUint32] immediately above
+	bps := uint32(avgAPY.Mul(decimal.NewFromInt(100)).Round(0).IntPart())
 	return bps, breakdown, nil
 }
 
@@ -302,7 +287,7 @@ func absDiffBPS(a, b uint32) uint32 {
 
 // RegistryReader adapts stellar.ContractReader to YieldRegistryReader.
 type RegistryReader struct {
-	Reader interface {
+	Reader  interface {
 		SourceAPYBPS(ctx context.Context, registryAddress, protocolID string) (uint32, error)
 	}
 	Address string

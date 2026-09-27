@@ -8,11 +8,7 @@ import (
 )
 
 // RouteMatch identifies a single method+path endpoint that a route-scoped
-// limiter (or the idempotency middleware) applies to.
-//
-// Path is matched against r.URL.Path. A segment of the form `{name}` is a
-// wildcard, so `/api/v1/vaults/{id}/deposit` matches any vault id. Paths
-// without braces still match exactly, preserving every existing caller.
+// limiter applies to. Path is matched exactly against r.URL.Path.
 type RouteMatch struct {
 	Method string
 	Path   string
@@ -107,50 +103,12 @@ func sensitiveRouteLimiter(l Limiter, routes []RouteMatch, keyFn func(*http.Requ
 	}
 }
 
-// matchesRoute reports whether r matches any of routes by method and path
-// pattern (see RouteMatch).
+// matchesRoute reports whether r matches any of routes by exact method and path.
 func matchesRoute(routes []RouteMatch, r *http.Request) bool {
 	for _, rt := range routes {
-		if r.Method == rt.Method && matchPathPattern(rt.Path, r.URL.Path) {
+		if r.Method == rt.Method && r.URL.Path == rt.Path {
 			return true
 		}
 	}
 	return false
-}
-
-// matchPathPattern reports whether path matches pattern. `{param}` segments
-// match any non-empty path segment; every other segment must be identical.
-func matchPathPattern(pattern, path string) bool {
-	if pattern == path {
-		return true
-	}
-	pSegs := splitPath(pattern)
-	pathSegs := splitPath(path)
-	if len(pSegs) != len(pathSegs) {
-		return false
-	}
-	for i, seg := range pSegs {
-		if isPathWildcard(seg) {
-			if pathSegs[i] == "" {
-				return false
-			}
-			continue
-		}
-		if seg != pathSegs[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func splitPath(p string) []string {
-	p = strings.Trim(p, "/")
-	if p == "" {
-		return nil
-	}
-	return strings.Split(p, "/")
-}
-
-func isPathWildcard(seg string) bool {
-	return len(seg) >= 2 && seg[0] == '{' && seg[len(seg)-1] == '}'
 }

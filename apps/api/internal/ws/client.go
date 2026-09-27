@@ -2,7 +2,6 @@ package ws
 
 import (
 	"encoding/json"
-	"strings"
 	"sync"
 	"time"
 
@@ -55,41 +54,23 @@ func (c *Client) readPump() {
 
 		var msg ClientMessage
 		if err := json.Unmarshal(message, &msg); err == nil {
-			switch msg.Action {
-			case ActionSubscribe:
+			if msg.Action == "subscribe" {
 				c.mu.Lock()
 				for _, ch := range msg.Channels {
-					if !c.maySubscribe(ch) {
-						c.hub.logger.Warn("websocket subscription rejected",
-							"channel", ch, "user_id", c.userID)
-						continue
-					}
 					c.subs[ch] = true
 					c.hub.subscribe(c, ch)
 				}
 				c.mu.Unlock()
-			case ActionUnsubscribe:
+			} else if msg.Action == "unsubscribe" {
 				c.mu.Lock()
 				for _, ch := range msg.Channels {
 					delete(c.subs, ch)
 					c.hub.unsubscribe(c, ch)
 				}
 				c.mu.Unlock()
-			case ActionPing:
-				c.pong()
 			}
 		}
 	}
-}
-
-// pong answers an application-level ping (see EventPong).
-//
-// The send goes through the hub rather than straight to c.send: the hub owns
-// that channel's lifetime and closes it during unregister and shutdown, and
-// this is the read pump, which runs concurrently with both. See
-// Hub.sendToClient.
-func (c *Client) pong() {
-	c.hub.sendToClient(c, Event{Type: EventPong, Timestamp: time.Now()})
 }
 
 // writePump pumps messages from the hub to the websocket connection.
@@ -118,31 +99,4 @@ func (c *Client) writePump() {
 			}
 		}
 	}
-}
-
-// userScopedChannelPrefixes are the channel namespaces whose second segment is
-// a user id. A client may only subscribe to its own.
-var userScopedChannelPrefixes = []string{"notifications/"}
-
-// maySubscribe reports whether this client is allowed to subscribe to ch.
-//
-// Channels outside the user-scoped namespaces are shared and open to any
-// authenticated client. Within them the second segment is a user id, and the
-// hub previously honoured whatever the client asked for — so one user could
-// name another's channel and receive their private events. The client's own
-// id comes from the authenticated session, not from the message, so it cannot
-// be spoofed by the subscribe frame (nester#1230).
-func (c *Client) maySubscribe(ch string) bool {
-	for _, prefix := range userScopedChannelPrefixes {
-		if !strings.HasPrefix(ch, prefix) {
-			continue
-		}
-		owner := strings.TrimPrefix(ch, prefix)
-		if i := strings.IndexByte(owner, '/'); i >= 0 {
-			owner = owner[:i]
-		}
-		// An unauthenticated client has no id and so owns no user channel.
-		return c.userID != "" && owner == c.userID
-	}
-	return true
 }

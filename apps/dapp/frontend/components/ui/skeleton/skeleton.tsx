@@ -1,7 +1,5 @@
 "use client";
 
-import React from "react";
-
 import { cn } from "@/lib/utils";
 
 interface SkeletonProps extends React.HTMLAttributes<HTMLDivElement> {
@@ -13,8 +11,7 @@ export function Skeleton({ className, animate = true, ...props }: SkeletonProps)
     <div
       className={cn(
         "rounded-lg bg-black/[0.04] dark:bg-white/[0.04]",
-        // `motion-reduce` drops the pulse for users who asked for less motion.
-        animate && "animate-pulse motion-reduce:animate-none",
+        animate && "animate-pulse",
         className
       )}
       {...props}
@@ -108,12 +105,6 @@ interface SkeletonChartProps {
   className?: string;
 }
 
-/**
- * Fixed bar heights rather than random ones: the chart skeleton renders on the
- * server too, and randomised inline styles produce a hydration mismatch.
- */
-const CHART_BAR_HEIGHTS = [42, 68, 35, 82, 55, 74, 48, 63];
-
 export function SkeletonChart({ 
   width = "100%", 
   height = "12rem",
@@ -126,56 +117,18 @@ export function SkeletonChart({
       
       {/* Simulated chart lines */}
       <div className="absolute inset-4 flex items-end justify-between">
-        {CHART_BAR_HEIGHTS.map((barHeight, i) => (
+        {Array.from({ length: 8 }).map((_, i) => (
           <div
             key={i}
-            className="bg-black/[0.08] dark:bg-white/[0.08] rounded-t-sm animate-pulse motion-reduce:animate-none"
+            className="bg-black/[0.08] dark:bg-white/[0.08] rounded-t-sm animate-pulse"
             style={{
               width: '8px',
-              height: `${barHeight}%`,
+              height: `${30 + Math.random() * 60}%`,
               animationDelay: `${i * 0.1}s`
             }}
           />
         ))}
       </div>
-    </div>
-  );
-}
-
-interface LoadingRegionProps {
-  /** Announced once by assistive tech instead of every shimmering block. */
-  label: string;
-  className?: string;
-  children: React.ReactNode;
-}
-
-/**
- * Wraps a group of skeletons in a single busy region. The skeletons themselves
- * are decorative (`aria-hidden` via the container), so screen readers hear one
- * "loading" message rather than a stream of empty boxes.
- *
- * `className` usually carries the same grid/flex layout the loaded content
- * uses, so the children are rendered as direct children of that container:
- * an element between them and the grid would collapse every skeleton into a
- * single track. Each child is marked decorative individually instead.
- */
-export function LoadingRegion({ label, className, children }: LoadingRegionProps) {
-  return (
-    <div
-      role="status"
-      aria-busy="true"
-      aria-live="polite"
-      data-testid="loading-region"
-      className={className}
-    >
-      <span className="sr-only">{label}</span>
-      {React.Children.map(children, (child) =>
-        React.isValidElement(child)
-          ? React.cloneElement(child as React.ReactElement<{ "aria-hidden"?: boolean }>, {
-              "aria-hidden": true,
-            })
-          : child,
-      )}
     </div>
   );
 }
