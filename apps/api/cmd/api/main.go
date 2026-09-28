@@ -37,6 +37,7 @@ import (
 	"github.com/suncrestlabs/nester/apps/api/internal/repository/postgres"
 	"github.com/suncrestlabs/nester/apps/api/internal/scheduler"
 	"github.com/suncrestlabs/nester/apps/api/internal/service"
+	balanceauditsvc "github.com/suncrestlabs/nester/apps/api/internal/service/balanceaudit"
 	performancesvc "github.com/suncrestlabs/nester/apps/api/internal/service/performance"
 	tvlsvc "github.com/suncrestlabs/nester/apps/api/internal/service/tvl"
 	"github.com/suncrestlabs/nester/apps/api/internal/services"
@@ -247,6 +248,18 @@ func run() error {
 	}
 	adminHandler.SetBackfillRunner(backfillRunner, backfillRepo)
 
+	// Balance audit sweep (#1338): scheduled consistency check across all
+	// vaults, also triggerable manually via the admin endpoint.
+	balanceAuditService := balanceauditsvc.NewService(vaultRepository, transactionRepository)
+	balanceAuditSweep := scheduler.NewBalanceAuditSweep(
+		scheduler.BalanceAuditSweepConfig{Enabled: true, Interval: 6 * time.Hour},
+		balanceAuditService,
+		nil,
+		baseLogger.WithGroup("balance_audit_sweep"),
+	)
+	adminHandler.SetBalanceSweepTrigger(balanceAuditSweep)
+	go balanceAuditSweep.Run(context.Background())
+
 	// A single shared Redis client (nil when REDIS_ADDR is unset) powers both the
 	// challenge store and the distributed rate limiters. When nil, both fall back
 	// to in-memory implementations suitable for single-instance deployments.
@@ -333,6 +346,7 @@ func run() error {
 	vaultRepository = postgres.NewVaultRepository(db)
 	performanceService := performancesvc.NewService(performanceRepository, vaultRepository)
 	performanceHandler := handler.NewPerformanceHandler(performanceService, handler.NewVaultOwnerAdapter(vaultRepository))
+	adminHandler.SetProjectionAccuracyProvider(performanceService)
 
 	// Projection service for compound interest calculations, plus the Monte
 	// Carlo savings forecast (#843), which needs the goal/schedule repos to

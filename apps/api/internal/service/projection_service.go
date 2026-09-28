@@ -137,10 +137,59 @@ func (s *ProjectionService) CalculateVaultProjection(ctx context.Context, input 
 		Input:        projInput,
 		Timeline:     timeline,
 		Summary:      summary,
+		Confidence:   s.calculateConfidenceBand(ctx, input.VaultID, projInput, summary),
 		CalculatedAt: time.Now(),
 	}
 
 	return output, nil
+}
+
+// calculateConfidenceBand derives a low/expected/high final-balance range
+// (issue #1334) by re-running the same deterministic calculator at APY
+// shifted by one historical standard deviation in each direction. Returns nil
+// if the deterministic run itself produced no summary to center the band on.
+func (s *ProjectionService) calculateConfidenceBand(ctx context.Context, vaultID uuid.UUID, base projection.ProjectionInput, summary projection.ProjectionSummary) *projection.ConfidenceBand {
+	stdDev, source := s.resolveAPYStdDev(ctx, vaultID, base.APY)
+
+	lowInput := base
+	lowInput.APY = decimal.Max(base.APY.Sub(decimal.NewFromFloat(stdDev)), decimal.Zero)
+	highInput := base
+	highInput.APY = base.APY.Add(decimal.NewFromFloat(stdDev))
+
+	lowTimeline := s.calculator.Calculate(lowInput)
+	highTimeline := s.calculator.Calculate(highInput)
+	if len(lowTimeline) == 0 || len(highTimeline) == 0 {
+		return nil
+	}
+
+	return &projection.ConfidenceBand{
+		Low:              lowTimeline[len(lowTimeline)-1].Total,
+		Expected:         summary.FinalBalance,
+		High:             highTimeline[len(highTimeline)-1].Total,
+		APYStdDev:        stdDev,
+		VolatilitySource: source,
+	}
+}
+
+// resolveAPYStdDev mirrors ProjectionService's Monte Carlo volatility
+// resolution (projection_simulation.go): use the vault's own historical daily
+// APY samples when there are enough to be meaningful, otherwise fall back to
+// the documented default prior.
+func (s *ProjectionService) resolveAPYStdDev(ctx context.Context, vaultID uuid.UUID, meanAPY decimal.Decimal) (float64, string) {
+	history, err := s.performanceRepo.APYHistoryForVault(ctx, vaultID, time.Now().Add(-simulationHistoryWindow), "day")
+	if err == nil && len(history) >= minHistoricalAPYSamples {
+		samples := make([]float64, 0, len(history))
+		for _, pt := range history {
+			if v, perr := strconv.ParseFloat(pt.APY, 64); perr == nil {
+				samples = append(samples, v/100)
+			}
+		}
+		if len(samples) >= minHistoricalAPYSamples {
+			_, stddev := projection.MeanStdDev(samples)
+			return stddev, "historical"
+		}
+	}
+	return meanAPY.InexactFloat64() * defaultAPYStdDevFraction, "default_prior"
 }
 
 // getCurrentAPY retrieves the current APY for a vault from performance data

@@ -103,6 +103,34 @@ type APYDataPoint struct {
 	APY  string `json:"apy"`  // decimal string, e.g. "10.45"
 }
 
+// ProjectionAccuracyPoint compares a "hold constant" projection made at the
+// start of a window against what the vault actually realized by the end of
+// it (issue #1335): Projected is the realized APY known at WindowStart (the
+// assumption a point-estimate projection made at that time would have held),
+// Realized is the realized APY at WindowEnd, and ErrorPct is Realized minus
+// Projected. This calibrates how far a "current APY holds" projection tends
+// to drift over the given window length, not a single vault's absolute
+// performance.
+type ProjectionAccuracyPoint struct {
+	VaultID     uuid.UUID       `json:"vault_id"`
+	Period      Period          `json:"period"`
+	WindowStart time.Time       `json:"window_start"`
+	WindowEnd   time.Time       `json:"window_end"`
+	Projected   decimal.Decimal `json:"projected_apy"`
+	Realized    decimal.Decimal `json:"realized_apy"`
+	ErrorPct    decimal.Decimal `json:"error_pct"`
+}
+
+// ProjectionAccuracySummary aggregates ProjectionAccuracyPoint.ErrorPct
+// across every vault/period sampled, so the calibration signal isn't tied to
+// any single vault's noise.
+type ProjectionAccuracySummary struct {
+	SampleCount   int                       `json:"sample_count"`
+	MeanErrorPct  decimal.Decimal           `json:"mean_error_pct"`
+	MeanAbsErrPct decimal.Decimal           `json:"mean_abs_error_pct"`
+	Points        []ProjectionAccuracyPoint `json:"points"`
+}
+
 // APYHistoryResponse is the payload for GET /api/v1/vaults/{id}/apy-history.
 type APYHistoryResponse struct {
 	VaultID      string         `json:"vault_id"`

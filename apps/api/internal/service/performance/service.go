@@ -382,6 +382,102 @@ func (s *Service) GetUserAnalytics(ctx context.Context, userID uuid.UUID, fromTi
 	}, nil
 }
 
+// accuracyLookbackWindow is how far back GetProjectionAccuracy samples
+// daily APY buckets from — long enough to compare a handful of non-
+// overlapping windows per vault, short enough to stay representative of
+// current market/allocation conditions.
+const accuracyLookbackWindow = 90 * 24 * time.Hour
+
+// GetProjectionAccuracy calibrates how far a "hold current APY constant"
+// projection tends to drift over a period-length window, across every vault
+// (issue #1335). For each vault it takes the daily-bucketed realized APY
+// over the last accuracyLookbackWindow and compares the earliest bucket
+// (the "projected" assumption) against the latest bucket (what was actually
+// realized by period.Days() later, or the last available bucket if the
+// vault has less history than that).
+func (s *Service) GetProjectionAccuracy(ctx context.Context, vaultIDs []uuid.UUID, period perfdom.Period) (perfdom.ProjectionAccuracySummary, error) {
+	now := s.clock()
+	since := now.Add(-accuracyLookbackWindow)
+
+	var points []perfdom.ProjectionAccuracyPoint
+	var sumErr, sumAbsErr decimal.Decimal
+
+	for _, vaultID := range vaultIDs {
+		history, err := s.repo.APYHistoryForVault(ctx, vaultID, since, "day")
+		if err != nil {
+			return perfdom.ProjectionAccuracySummary{}, fmt.Errorf("apy history for vault %s: %w", vaultID, err)
+		}
+		if len(history) < 2 {
+			// Not enough history to compare a start vs. end bucket.
+			continue
+		}
+
+		first := history[0]
+		last := history[len(history)-1]
+
+		projected, perr := decimal.NewFromString(first.APY)
+		if perr != nil {
+			continue
+		}
+		realized, rerr := decimal.NewFromString(last.APY)
+		if rerr != nil {
+			continue
+		}
+
+		startAt, err := time.Parse("2006-01-02", first.Date)
+		if err != nil {
+			startAt = since
+		}
+		endAt, err := time.Parse("2006-01-02", last.Date)
+		if err != nil {
+			endAt = now
+		}
+
+		errPct := realized.Sub(projected)
+		points = append(points, perfdom.ProjectionAccuracyPoint{
+			VaultID:     vaultID,
+			Period:      period,
+			WindowStart: startAt,
+			WindowEnd:   endAt,
+			Projected:   projected,
+			Realized:    realized,
+			ErrorPct:    errPct,
+		})
+		sumErr = sumErr.Add(errPct)
+		sumAbsErr = sumAbsErr.Add(errPct.Abs())
+	}
+
+	summary := perfdom.ProjectionAccuracySummary{SampleCount: len(points), Points: points}
+	if len(points) > 0 {
+		n := decimal.NewFromInt(int64(len(points)))
+		summary.MeanErrorPct = sumErr.Div(n).Round(4)
+		summary.MeanAbsErrPct = sumAbsErr.Div(n).Round(4)
+	}
+	return summary, nil
+}
+
+// ListVaultIDs returns every vault ID, for the admin projection-accuracy
+// endpoint (#1335) to sweep across.
+func (s *Service) ListVaultIDs(ctx context.Context) ([]uuid.UUID, error) {
+	const pageSize = 500
+	var ids []uuid.UUID
+	offset := 0
+	for {
+		vaults, total, err := s.vaultRepo.ListVaults(ctx, vault.ListFilter{Limit: pageSize, Offset: offset})
+		if err != nil {
+			return nil, err
+		}
+		for _, v := range vaults {
+			ids = append(ids, v.ID)
+		}
+		offset += len(vaults)
+		if len(vaults) == 0 || offset >= total {
+			break
+		}
+	}
+	return ids, nil
+}
+
 // Tracker is the snapshot-taking background worker.
 type Tracker struct {
 	repo     perfdom.SnapshotRepository

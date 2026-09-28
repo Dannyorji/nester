@@ -106,6 +106,19 @@ func (r *fakeTransactionRepo) ListUserTransactions(_ context.Context, filter tra
 	return out, total, nil
 }
 
+func (r *fakeTransactionRepo) ListCompletedByVault(_ context.Context, vaultID uuid.UUID) ([]transaction.Transaction, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	var out []transaction.Transaction
+	for _, tx := range r.txs {
+		if tx.VaultID == vaultID && tx.Status == transaction.StatusCompleted {
+			out = append(out, tx)
+		}
+	}
+	return out, nil
+}
+
 // horizonStub returns a Horizon server that responds to GET /transactions/{hash}
 // based on the provided per-hash responses. A hash with no entry returns 404
 // (Horizon's "not yet ingested / still pending" signal).

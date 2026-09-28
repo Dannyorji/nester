@@ -106,6 +106,37 @@ func (r *TransactionRepository) ListPendingOlderThan(ctx context.Context, cutoff
 	return transactions, nil
 }
 
+// ListCompletedByVault returns every completed transaction for a vault,
+// oldest first, for the balanceaudit sweep (#1338) to replay.
+func (r *TransactionRepository) ListCompletedByVault(ctx context.Context, vaultID uuid.UUID) ([]transaction.Transaction, error) {
+	query := `
+		SELECT id, vault_id, type, amount, currency, tx_hash, status, error_reason, created_at, updated_at, confirmed_at
+		FROM transactions
+		WHERE vault_id = $1 AND status = $2
+		ORDER BY created_at ASC
+	`
+
+	rows, err := r.db.QueryContext(ctx, query, vaultID, string(transaction.StatusCompleted))
+	if err != nil {
+		return nil, mapTransactionError(err)
+	}
+	defer rows.Close()
+
+	var transactions []transaction.Transaction
+	for rows.Next() {
+		model, err := scanTransaction(rows)
+		if err != nil {
+			return nil, mapTransactionError(err)
+		}
+		transactions = append(transactions, model)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, mapTransactionError(err)
+	}
+
+	return transactions, nil
+}
+
 func (r *TransactionRepository) UpdateStatus(ctx context.Context, hash string, status transaction.TransactionStatus, confirmedAt *time.Time, errorReason string) (transaction.Transaction, error) {
 	result, err := r.db.ExecContext(
 		ctx,
