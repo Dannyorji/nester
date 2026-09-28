@@ -68,4 +68,8 @@ type Repository interface {
 	// ListUserTransactions returns paginated transactions scoped to the user,
 	// with optional filtering by vault, type, and status.
 	ListUserTransactions(ctx context.Context, filter ListFilter) ([]Transaction, int, error)
+	// ListCompletedByVault returns every StatusCompleted transaction for a
+	// vault, oldest first. Used by the balanceaudit sweep (#1338) to replay
+	// a vault's deposit/withdrawal ledger.
+	ListCompletedByVault(ctx context.Context, vaultID uuid.UUID) ([]Transaction, error)
 }

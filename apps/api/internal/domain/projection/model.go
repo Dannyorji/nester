@@ -107,7 +107,24 @@ type ProjectionOutput struct {
 	Input        ProjectionInput   `json:"input"`
 	Timeline     []ProjectionPoint `json:"timeline"`
 	Summary      ProjectionSummary `json:"summary"`
+	Confidence   *ConfidenceBand   `json:"confidence,omitempty"`
 	CalculatedAt time.Time         `json:"calculated_at"`
+}
+
+// ConfidenceBand reports a low/expected/high final-balance range around
+// Summary.FinalBalance, derived from historical APY variance (issue #1334).
+// Expected always equals Summary.FinalBalance; Low/High re-run the same
+// deterministic calculator at APY shifted by one standard deviation in each
+// direction, so the band reflects "how much would the point estimate move if
+// realized APY came in a standard deviation off the mean" rather than a
+// resampled distribution (that's what the separate Monte Carlo endpoint in
+// simulation.go is for).
+type ConfidenceBand struct {
+	Low              decimal.Decimal `json:"low"`
+	Expected         decimal.Decimal `json:"expected"`
+	High             decimal.Decimal `json:"high"`
+	APYStdDev        float64         `json:"apy_std_dev"`
+	VolatilitySource string          `json:"volatility_source"` // "historical" | "default_prior"
 }
 
 // ProjectionSummary provides aggregate statistics about the projection

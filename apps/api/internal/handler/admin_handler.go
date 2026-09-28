@@ -16,6 +16,8 @@ import (
 	"github.com/suncrestlabs/nester/apps/api/internal/auth"
 	admindomain "github.com/suncrestlabs/nester/apps/api/internal/domain/admin"
 	"github.com/suncrestlabs/nester/apps/api/internal/domain/backfill"
+	"github.com/suncrestlabs/nester/apps/api/internal/domain/balanceaudit"
+	"github.com/suncrestlabs/nester/apps/api/internal/domain/performance"
 	"github.com/suncrestlabs/nester/apps/api/internal/domain/savingsgoal"
 	"github.com/suncrestlabs/nester/apps/api/internal/domain/user"
 	"github.com/suncrestlabs/nester/apps/api/internal/domain/vault"
@@ -127,22 +129,101 @@ func (noopAuditChainVerifier) RunOnce(_ context.Context) (bool, int64, error) {
 	return true, 0, nil
 }
 
+// BalanceSweepTrigger lets the admin handler start a manual balanceaudit
+// sweep run (#1338) on demand, outside the scheduled interval.
+type BalanceSweepTrigger interface {
+	RunOnce(ctx context.Context) (balanceaudit.SweepResult, error)
+}
+
+type noopBalanceSweepTrigger struct{}
+
+func (noopBalanceSweepTrigger) RunOnce(_ context.Context) (balanceaudit.SweepResult, error) {
+	return balanceaudit.SweepResult{}, errBalanceSweepNotConfigured
+}
+
+var errBalanceSweepNotConfigured = errors.New("balance audit sweep not configured")
+
+// ProjectionAccuracyProvider lets the admin handler surface realized-vs-
+// projected APY accuracy across vaults (#1335).
+type ProjectionAccuracyProvider interface {
+	GetProjectionAccuracy(ctx context.Context, vaultIDs []uuid.UUID, period performance.Period) (performance.ProjectionAccuracySummary, error)
+	ListVaultIDs(ctx context.Context) ([]uuid.UUID, error)
+}
+
+type noopProjectionAccuracyProvider struct{}
+
+func (noopProjectionAccuracyProvider) GetProjectionAccuracy(_ context.Context, _ []uuid.UUID, _ performance.Period) (performance.ProjectionAccuracySummary, error) {
+	return performance.ProjectionAccuracySummary{}, errProjectionAccuracyNotConfigured
+}
+
+func (noopProjectionAccuracyProvider) ListVaultIDs(_ context.Context) ([]uuid.UUID, error) {
+	return nil, errProjectionAccuracyNotConfigured
+}
+
+var errProjectionAccuracyNotConfigured = errors.New("projection accuracy tracking not configured")
+
 type AdminHandler struct {
-	service            adminService
-	userService        *service.UserService
-	eventSyncer        EventSyncer
-	leadership         LeadershipStatus
-	backfillTrigger    BackfillTrigger
-	backfillRuns       BackfillRunLister
-	auditChainVerifier AuditChainVerifier
+	service             adminService
+	userService         *service.UserService
+	eventSyncer         EventSyncer
+	leadership          LeadershipStatus
+	backfillTrigger     BackfillTrigger
+	backfillRuns        BackfillRunLister
+	auditChainVerifier  AuditChainVerifier
+	balanceSweepTrigger BalanceSweepTrigger
+	projectionAccuracy  ProjectionAccuracyProvider
 }
 
 func NewAdminHandler(svc adminService, userSvc *service.UserService) *AdminHandler {
 	return &AdminHandler{
 		service: svc, userService: userSvc, eventSyncer: noopEventSyncer{}, leadership: noopLeadershipStatus{},
 		backfillTrigger: noopBackfillTrigger{}, backfillRuns: noopBackfillRunLister{},
-		auditChainVerifier: noopAuditChainVerifier{},
+		auditChainVerifier:  noopAuditChainVerifier{},
+		balanceSweepTrigger: noopBalanceSweepTrigger{},
+		projectionAccuracy:  noopProjectionAccuracyProvider{},
 	}
+}
+
+// SetBalanceSweepTrigger wires a real *scheduler.BalanceAuditSweep (#1338) so
+// POST /api/v1/admin/balance-audit/sweep can trigger a manual sweep run.
+func (h *AdminHandler) SetBalanceSweepTrigger(t BalanceSweepTrigger) {
+	h.balanceSweepTrigger = t
+}
+
+// SetProjectionAccuracyProvider wires the projection accuracy tracker
+// (#1335) so GET /api/v1/admin/projections/accuracy can report realized-vs-
+// projected APY calibration across vaults.
+func (h *AdminHandler) SetProjectionAccuracyProvider(p ProjectionAccuracyProvider) {
+	h.projectionAccuracy = p
+}
+
+func (h *AdminHandler) runBalanceSweep(w http.ResponseWriter, r *http.Request) {
+	result, err := h.balanceSweepTrigger.RunOnce(r.Context())
+	if err != nil {
+		response.WriteJSON(w, http.StatusServiceUnavailable, response.Err(http.StatusServiceUnavailable, "sweep_failed", err.Error()))
+		return
+	}
+	response.WriteJSON(w, http.StatusOK, response.OK(result))
+}
+
+func (h *AdminHandler) getProjectionAccuracy(w http.ResponseWriter, r *http.Request) {
+	period := performance.Period(r.URL.Query().Get("period"))
+	if period == "" {
+		period = performance.Period30d
+	}
+
+	vaultIDs, err := h.projectionAccuracy.ListVaultIDs(r.Context())
+	if err != nil {
+		response.WriteJSON(w, http.StatusServiceUnavailable, response.Err(http.StatusServiceUnavailable, "accuracy_unavailable", err.Error()))
+		return
+	}
+
+	summary, err := h.projectionAccuracy.GetProjectionAccuracy(r.Context(), vaultIDs, period)
+	if err != nil {
+		response.WriteJSON(w, http.StatusInternalServerError, response.Err(http.StatusInternalServerError, "accuracy_failed", err.Error()))
+		return
+	}
+	response.WriteJSON(w, http.StatusOK, response.OK(summary))
 }
 
 // SetAuditChainVerifier wires the audit chain verifier so operators can trigger
@@ -224,6 +305,10 @@ func (h *AdminHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/admin/backfill", h.startBackfill)
 	mux.HandleFunc("POST /api/v1/admin/backfill/{id}/resume", h.resumeBackfill)
 	mux.HandleFunc("GET /api/v1/admin/backfill", h.listBackfillRuns)
+
+	// Balance audit sweep (#1338) and projection accuracy tracking (#1335).
+	mux.HandleFunc("POST /api/v1/admin/balance-audit/sweep", h.runBalanceSweep)
+	mux.HandleFunc("GET /api/v1/admin/projections/accuracy", h.getProjectionAccuracy)
 	mux.HandleFunc("GET /api/v1/admin/backfill/{id}", h.getBackfillRun)
 }
 

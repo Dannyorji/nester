@@ -84,6 +84,16 @@ func (r *fakeTransactionRepository) ListUserTransactions(_ context.Context, _ tr
 	return nil, 0, nil
 }
 
+func (r *fakeTransactionRepository) ListCompletedByVault(_ context.Context, vaultID uuid.UUID) ([]transaction.Transaction, error) {
+	var out []transaction.Transaction
+	for _, t := range r.transactions {
+		if t.VaultID == vaultID && t.Status == transaction.StatusCompleted {
+			out = append(out, t)
+		}
+	}
+	return out, nil
+}
+
 func TestCreateTransactionIDORReturns403ForOtherUser(t *testing.T) {
 	ownerID := uuid.New()
 	otherID := uuid.New()
