@@ -777,6 +777,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nester-multisig"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "nester-access-control",
+ "nester-contract",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "nester-recurring-deposit"
 version = "0.1.0"
 dependencies = [

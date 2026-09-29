@@ -3,6 +3,7 @@ package stellar
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +17,10 @@ type HealthResult struct {
 	Error         string `json:"error,omitempty"`
 	LatencyMillis int64  `json:"latency_ms,omitempty"`
 	LatestLedger  uint64 `json:"latest_ledger,omitempty"`
+	// NetworkPassphrase is the passphrase the endpoint reports serving, when
+	// it exposes one. Used at startup to catch a mainnet process pointed at a
+	// testnet endpoint (or vice versa) that URL heuristics cannot recognise.
+	NetworkPassphrase string `json:"network_passphrase,omitempty"`
 }
 
 // PingHorizon issues a GET against the Horizon root endpoint and reports
@@ -46,6 +51,7 @@ func PingHorizon(ctx context.Context, client *http.Client, horizonURL string) He
 	var payload struct {
 		HistoryLatestLedger uint64 `json:"history_latest_ledger"`
 		CoreLatestLedger    uint64 `json:"core_latest_ledger"`
+		NetworkPassphrase   string `json:"network_passphrase"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&payload); err != nil {
 		// Reachability is established by the 2xx response; failure to parse
@@ -57,7 +63,7 @@ func PingHorizon(ctx context.Context, client *http.Client, horizonURL string) He
 	if ledger == 0 {
 		ledger = payload.CoreLatestLedger
 	}
-	return HealthResult{OK: true, Endpoint: horizonURL, LatestLedger: ledger}
+	return HealthResult{OK: true, Endpoint: horizonURL, LatestLedger: ledger, NetworkPassphrase: payload.NetworkPassphrase}
 }
 
 // PingSorobanRPC issues a getHealth JSON-RPC call to a Soroban RPC node and
@@ -112,4 +118,53 @@ func PingSorobanRPC(ctx context.Context, client *http.Client, rpcURL string) Hea
 		return HealthResult{Endpoint: rpcURL, Error: fmt.Sprintf("rpc status %q", rpcResp.Result.Status)}
 	}
 	return HealthResult{OK: true, Endpoint: rpcURL, LatestLedger: rpcResp.Result.LatestLedger}
+}
+
+// FetchRPCNetworkPassphrase calls getNetwork on a Soroban RPC node and returns
+// the passphrase of the network it serves.
+func FetchRPCNetworkPassphrase(ctx context.Context, client *http.Client, rpcURL string) (string, error) {
+	body, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      "nester-network",
+		"method":  "getNetwork",
+	})
+	if err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rpcURL, strings.NewReader(string(body)))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return "", fmt.Errorf("status %d", resp.StatusCode)
+	}
+
+	var rpcResp struct {
+		Result struct {
+			Passphrase string `json:"passphrase"`
+		} `json:"result"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&rpcResp); err != nil {
+		return "", fmt.Errorf("decode: %w", err)
+	}
+	if rpcResp.Error != nil {
+		return "", errors.New(rpcResp.Error.Message)
+	}
+	if rpcResp.Result.Passphrase == "" {
+		return "", errors.New("getNetwork returned no passphrase")
+	}
+	return rpcResp.Result.Passphrase, nil
 }

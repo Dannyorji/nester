@@ -6,6 +6,7 @@ members = [
   "contracts/adapter_pool",
   "contracts/allocation_strategy",
   "contracts/lp_aggregator",
+  "contracts/multisig",
   "contracts/nester",
   "contracts/recurring_deposit",
   "contracts/referral",

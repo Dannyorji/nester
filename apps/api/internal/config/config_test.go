@@ -18,7 +18,8 @@ func baseEnv(t *testing.T) {
 		"SERVER_HOST", "SERVER_PORT",
 		"SERVER_READ_TIMEOUT", "SERVER_WRITE_TIMEOUT", "SERVER_SHUTDOWN_TIMEOUT",
 		"DATABASE_DSN", "DATABASE_POOL_SIZE", "DATABASE_CONNECTION_TIMEOUT",
-		"STELLAR_NETWORK_PASSPHRASE", "STELLAR_RPC_URL", "STELLAR_HORIZON_URL", "STELLAR_USDC_ISSUER",
+		"STELLAR_NETWORK", "STELLAR_NETWORK_PASSPHRASE", "STELLAR_RPC_URL", "STELLAR_HORIZON_URL", "STELLAR_USDC_ISSUER",
+		"STELLAR_ADMIN_MULTISIG_ADDRESS", "YIELD_REGISTRY_CONTRACT", "STELLAR_ALLOCATION_STRATEGY_ADDRESS",
 		"AUTH_JWT_SECRET", "AUTH_ACCESS_TOKEN_EXPIRY", "AUTH_REFRESH_TOKEN_EXPIRY", "AUTH_ABSOLUTE_SESSION_LIFETIME", "AUTH_CHALLENGE_EXPIRY",
 		"RATELIMIT_GLOBAL_LIMIT", "RATELIMIT_GLOBAL_WINDOW", "RATELIMIT_WRITE_LIMIT", "RATELIMIT_WRITE_WINDOW",
 		"RATELIMIT_WALLET_LIMIT", "RATELIMIT_WALLET_WINDOW",
@@ -36,7 +37,8 @@ func baseEnv(t *testing.T) {
 func requiredEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("DATABASE_DSN", "postgres://postgres:postgres@localhost:5432/nester?sslmode=disable")
-	t.Setenv("STELLAR_NETWORK_PASSPHRASE", "Test Network")
+	t.Setenv("STELLAR_NETWORK", NetworkTestnet)
+	t.Setenv("STELLAR_NETWORK_PASSPHRASE", TestnetPassphrase)
 	t.Setenv("STELLAR_RPC_URL", "https://rpc.example.com")
 	t.Setenv("STELLAR_HORIZON_URL", "https://horizon.example.com")
 	t.Setenv("AUTH_JWT_SECRET", "this-is-a-very-secret-jwt-key-that-is-at-least-thirty-two-bytes")
@@ -55,7 +57,8 @@ func TestLoadFromDotEnv(t *testing.T) {
 	writeFile(t, filepath.Join(dir, ".env"), strings.Join([]string{
 		"APP_ENV=staging",
 		"DATABASE_DSN=postgres://postgres:postgres@localhost:5432/nester?sslmode=disable",
-		"STELLAR_NETWORK_PASSPHRASE=Test Network",
+		"STELLAR_NETWORK=testnet",
+		"STELLAR_NETWORK_PASSPHRASE=" + TestnetPassphrase,
 		"STELLAR_RPC_URL=https://rpc.example.com",
 		"STELLAR_HORIZON_URL=https://horizon.example.com",
 		"AUTH_JWT_SECRET=this-is-a-very-secret-jwt-key-that-is-at-least-thirty-two-bytes",
@@ -209,7 +212,8 @@ func TestLoadEnvVarsTakePrecedenceOverDotEnv(t *testing.T) {
 	t.Setenv("APP_ENV", "production")
 	t.Setenv("SERVER_PORT", "9000")
 	t.Setenv("DATABASE_DSN", "postgres://envvar:secret@localhost:5432/nester?sslmode=disable")
-	t.Setenv("STELLAR_NETWORK_PASSPHRASE", "From EnvVar")
+	t.Setenv("STELLAR_NETWORK", NetworkTestnet)
+	t.Setenv("STELLAR_NETWORK_PASSPHRASE", TestnetPassphrase)
 	t.Setenv("STELLAR_RPC_URL", "https://envvar-rpc.example.com")
 	t.Setenv("STELLAR_HORIZON_URL", "https://envvar-horizon.example.com")
 	t.Setenv("ALLOWED_ORIGINS", "https://app.example.com")
@@ -220,7 +224,8 @@ func TestLoadEnvVarsTakePrecedenceOverDotEnv(t *testing.T) {
 		"APP_ENV=development",
 		"SERVER_PORT=8080",
 		"DATABASE_DSN=postgres://dotenv:secret@localhost:5432/nester?sslmode=disable",
-		"STELLAR_NETWORK_PASSPHRASE=From DotEnv",
+		"STELLAR_NETWORK=futurenet",
+		"STELLAR_NETWORK_PASSPHRASE=" + FuturenetPassphrase,
 		"STELLAR_RPC_URL=https://dotenv-rpc.example.com",
 		"STELLAR_HORIZON_URL=https://dotenv-horizon.example.com",
 		"AUTH_JWT_SECRET=this-is-a-very-secret-jwt-key-that-is-at-least-thirty-two-bytes",
@@ -238,7 +243,7 @@ func TestLoadEnvVarsTakePrecedenceOverDotEnv(t *testing.T) {
 	if cfg.Server().Port() != 9000 {
 		t.Fatalf("expected port 9000 from env var, got %d", cfg.Server().Port())
 	}
-	if cfg.Stellar().NetworkPassphrase() != "From EnvVar" {
+	if cfg.Stellar().NetworkPassphrase() != TestnetPassphrase {
 		t.Fatalf("expected stellar passphrase from env var, got %q", cfg.Stellar().NetworkPassphrase())
 	}
 }
@@ -253,7 +258,8 @@ func TestLoadConcurrentCalls(t *testing.T) {
 		"APP_ENV=staging",
 		"SERVER_PORT=8088",
 		"DATABASE_DSN=postgres://postgres:postgres@localhost:5432/nester?sslmode=disable",
-		"STELLAR_NETWORK_PASSPHRASE=Concurrent Network",
+		"STELLAR_NETWORK=futurenet",
+		"STELLAR_NETWORK_PASSPHRASE=" + FuturenetPassphrase,
 		"STELLAR_RPC_URL=https://rpc.example.com",
 		"STELLAR_HORIZON_URL=https://horizon.example.com",
 		"AUTH_JWT_SECRET=this-is-a-very-secret-jwt-key-that-is-at-least-thirty-two-bytes",
@@ -286,7 +292,7 @@ func TestLoadConcurrentCalls(t *testing.T) {
 				errCh <- &testErr{message: "unexpected server port"}
 				return
 			}
-			if cfg.Stellar().NetworkPassphrase() != "Concurrent Network" {
+			if cfg.Stellar().NetworkPassphrase() != FuturenetPassphrase {
 				errCh <- &testErr{message: "unexpected stellar passphrase"}
 				return
 			}
@@ -316,7 +322,8 @@ func TestLoadProcessEnvOverridesDotEnvAndFallsBack(t *testing.T) {
 		"APP_ENV=development",
 		"SERVER_PORT=8080",
 		"DATABASE_DSN=postgres://dotenv:secret@localhost:5432/nester?sslmode=disable",
-		"STELLAR_NETWORK_PASSPHRASE=From DotEnv",
+		"STELLAR_NETWORK=futurenet",
+		"STELLAR_NETWORK_PASSPHRASE=" + FuturenetPassphrase,
 		"STELLAR_RPC_URL=https://dotenv-rpc.example.com",
 		"STELLAR_HORIZON_URL=https://dotenv-horizon.example.com",
 		"AUTH_JWT_SECRET=this-is-a-very-secret-jwt-key-that-is-at-least-thirty-two-bytes",
@@ -338,7 +345,7 @@ func TestLoadProcessEnvOverridesDotEnvAndFallsBack(t *testing.T) {
 	if cfg.Database().DSN() != "postgres://env:secret@localhost:5432/nester?sslmode=disable" {
 		t.Fatalf("expected DATABASE_DSN from process env, got %q", cfg.Database().DSN())
 	}
-	if cfg.Stellar().NetworkPassphrase() != "From DotEnv" {
+	if cfg.Stellar().NetworkPassphrase() != FuturenetPassphrase {
 		t.Fatalf("expected STELLAR_NETWORK_PASSPHRASE from .env fallback, got %q", cfg.Stellar().NetworkPassphrase())
 	}
 	if cfg.Log().Level() != "warn" {
@@ -415,7 +422,8 @@ func TestLoadAllDefaults(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, ".env"), strings.Join([]string{
 		"DATABASE_DSN=postgres://postgres:postgres@localhost:5432/nester?sslmode=disable",
-		"STELLAR_NETWORK_PASSPHRASE=Test Network",
+		"STELLAR_NETWORK=testnet",
+		"STELLAR_NETWORK_PASSPHRASE=" + TestnetPassphrase,
 		"STELLAR_RPC_URL=https://rpc.example.com",
 		"STELLAR_HORIZON_URL=https://horizon.example.com",
 		"AUTH_JWT_SECRET=this-is-a-very-secret-jwt-key-that-is-at-least-thirty-two-bytes",
@@ -514,7 +522,8 @@ func TestLoadUnknownKeysIgnored(t *testing.T) {
 	writeFile(t, filepath.Join(dir, ".env"), strings.Join([]string{
 		"APP_ENV=test",
 		"DATABASE_DSN=postgres://postgres:postgres@localhost:5432/nester?sslmode=disable",
-		"STELLAR_NETWORK_PASSPHRASE=Test Network",
+		"STELLAR_NETWORK=testnet",
+		"STELLAR_NETWORK_PASSPHRASE=" + TestnetPassphrase,
 		"STELLAR_RPC_URL=https://rpc.example.com",
 		"STELLAR_HORIZON_URL=https://horizon.example.com",
 		"AUTH_JWT_SECRET=this-is-a-very-secret-jwt-key-that-is-at-least-thirty-two-bytes",
@@ -544,7 +553,8 @@ func TestLoadEmptyEnvVarsTreatedAsUnset(t *testing.T) {
 	writeFile(t, filepath.Join(dir, ".env"), strings.Join([]string{
 		"APP_ENV=test",
 		"DATABASE_DSN=postgres://postgres:postgres@localhost:5432/nester?sslmode=disable",
-		"STELLAR_NETWORK_PASSPHRASE=Test Network",
+		"STELLAR_NETWORK=testnet",
+		"STELLAR_NETWORK_PASSPHRASE=" + TestnetPassphrase,
 		"STELLAR_RPC_URL=https://rpc.example.com",
 		"STELLAR_HORIZON_URL=https://horizon.example.com",
 		"AUTH_JWT_SECRET=this-is-a-very-secret-jwt-key-that-is-at-least-thirty-two-bytes",

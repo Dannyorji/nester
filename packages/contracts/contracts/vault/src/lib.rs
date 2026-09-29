@@ -1990,6 +1990,12 @@ impl VaultContract {
         AccessControl::accept_admin(&env, &new_admin);
     }
 
+    /// Read-only role check, so operators can verify on-chain that
+    /// privileged roles are held by the admin multisig (#1374).
+    pub fn has_role(env: Env, account: Address, role: Role) -> bool {
+        AccessControl::has_role(&env, &account, role)
+    }
+
     // -----------------------------------------------------------------------
     // Circuit breaker (issue #817)
     // -----------------------------------------------------------------------

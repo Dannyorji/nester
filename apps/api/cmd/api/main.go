@@ -215,6 +215,10 @@ func run() error {
 		chainInvoker = inv
 		vaultService.SetDepositInvoker(inv)
 	}
+	if cfg.Stellar().IsMainnet() {
+		// #1374: pause/unpause are held by the admin multisig on mainnet.
+		chainInvoker = service.NewMultisigGuardedInvoker(chainInvoker, cfg.Stellar().AdminMultisigAddress())
+	}
 
 	adminService := service.NewAdminService(
 		adminRepository,
@@ -1392,11 +1396,11 @@ func pingStellarDependencies(logger *slog.Logger, cfg *config.Config) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	if res := stellarpkg.PingHorizon(ctx, client, cfg.Stellar().HorizonURL()); !res.OK {
-		return fmt.Errorf("horizon unreachable at %s: %s", cfg.Stellar().HorizonURL(), res.Error)
-	} else {
-		logger.Info("horizon reachable", "url", cfg.Stellar().HorizonURL(), "latest_ledger", res.LatestLedger)
+	horizon := stellarpkg.PingHorizon(ctx, client, cfg.Stellar().HorizonURL())
+	if !horizon.OK {
+		return fmt.Errorf("horizon unreachable at %s: %s", cfg.Stellar().HorizonURL(), horizon.Error)
 	}
+	logger.Info("horizon reachable", "url", cfg.Stellar().HorizonURL(), "latest_ledger", horizon.LatestLedger)
 
 	rpcCtx, rpcCancel := context.WithTimeout(context.Background(), timeout)
 	defer rpcCancel()
@@ -1406,5 +1410,43 @@ func pingStellarDependencies(logger *slog.Logger, cfg *config.Config) error {
 		logger.Info("soroban rpc reachable", "url", cfg.Stellar().RPCURL(), "latest_ledger", res.LatestLedger)
 	}
 
+	netCtx, netCancel := context.WithTimeout(context.Background(), timeout)
+	defer netCancel()
+	rpcPassphrase, rpcErr := stellarpkg.FetchRPCNetworkPassphrase(netCtx, client, cfg.Stellar().RPCURL())
+
+	return verifyEndpointNetworks(logger, cfg.Stellar().NetworkPassphrase(), cfg.Stellar().IsMainnet(), []endpointNetwork{
+		{name: "horizon", url: cfg.Stellar().HorizonURL(), passphrase: horizon.NetworkPassphrase},
+		{name: "soroban rpc", url: cfg.Stellar().RPCURL(), passphrase: rpcPassphrase, err: rpcErr},
+	})
+}
+
+// endpointNetwork is the passphrase a Stellar endpoint reported at startup,
+// or the error that prevented it from reporting one.
+type endpointNetwork struct {
+	name, url, passphrase string
+	err                   error
+}
+
+// verifyEndpointNetworks refuses to boot when Horizon or Soroban RPC report a
+// different network than STELLAR_NETWORK_PASSPHRASE (#1371). On mainnet an
+// endpoint that cannot report its network is also fatal; elsewhere it is
+// logged, since local and private nodes do not always expose it.
+func verifyEndpointNetworks(logger *slog.Logger, want string, mainnet bool, endpoints []endpointNetwork) error {
+	for _, ep := range endpoints {
+		if ep.passphrase == "" {
+			reason := "endpoint did not report a network passphrase"
+			if ep.err != nil {
+				reason = ep.err.Error()
+			}
+			if mainnet {
+				return fmt.Errorf("%s at %s: cannot verify it serves mainnet: %s", ep.name, ep.url, reason)
+			}
+			logger.Warn("could not verify stellar endpoint network", "endpoint", ep.name, "url", ep.url, "reason", reason)
+			continue
+		}
+		if ep.passphrase != want {
+			return fmt.Errorf("%s at %s serves network %q but STELLAR_NETWORK_PASSPHRASE is %q; refusing to boot", ep.name, ep.url, ep.passphrase, want)
+		}
+	}
 	return nil
 }
