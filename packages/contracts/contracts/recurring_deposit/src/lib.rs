@@ -12,6 +12,7 @@ use nester_common::{
     errors::Error,
     events::emit_event,
     upgrade::{PendingUpgrade, Upgrade},
+    MIN_UPGRADE_DELAY_RECURRING_DEPOSIT,
 };
 
 pub const MAX_MANDATES_PER_USER: u32 = 50;
@@ -473,18 +474,30 @@ impl RecurringDepositContract {
     // Upgrade
     // -----------------------------------------------------------------------
 
-    pub fn propose_upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
-        admin.require_auth();
-        Upgrade::propose_upgrade(&env, &admin, new_wasm_hash, 0, u64::MAX);
+    /// Proposes a new WASM upgrade.
+    ///
+    /// Requires Upgrader role and enforces MIN_UPGRADE_DELAY_RECURRING_DEPOSIT
+    /// (48 hours) between proposal and `eta`, so users with standing
+    /// mandates can revoke them before new code can pull from their wallets.
+    pub fn propose_upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>, eta: u64) {
+        AccessControl::require_role(&env, &admin, Role::Upgrader);
+        Upgrade::propose_upgrade(
+            &env,
+            &admin,
+            new_wasm_hash,
+            MIN_UPGRADE_DELAY_RECURRING_DEPOSIT,
+            eta,
+        );
     }
 
-    pub fn execute_upgrade(env: Env, admin: Address, wasm_hash: BytesN<32>) {
-        admin.require_auth();
-        Upgrade::execute_upgrade(&env, &admin, wasm_hash);
+    /// Executes a matured WASM upgrade. Permissionless after maturity.
+    pub fn execute_upgrade(env: Env, caller: Address, wasm_hash: BytesN<32>) {
+        Upgrade::execute_upgrade(&env, &caller, wasm_hash);
     }
 
+    /// Cancels a pending WASM upgrade. Requires Upgrader role.
     pub fn cancel_upgrade(env: Env, admin: Address) {
-        admin.require_auth();
+        AccessControl::require_role(&env, &admin, Role::Upgrader);
         Upgrade::cancel_upgrade(&env, &admin);
     }
 

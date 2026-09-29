@@ -878,6 +878,8 @@ func (h *AdminHandler) writeError(w http.ResponseWriter, r *http.Request, err er
 		response.WriteJSON(w, http.StatusConflict, response.Err(http.StatusConflict, "REBALANCE_IN_FLIGHT", err.Error()))
 	case errors.Is(err, service.ErrRebalanceNotEligible):
 		response.WriteJSON(w, http.StatusBadRequest, response.Err(http.StatusBadRequest, "REBALANCE_NOT_ELIGIBLE", err.Error()))
+	case errors.Is(err, service.ErrMultisigRequired):
+		response.WriteJSON(w, http.StatusConflict, response.Err(http.StatusConflict, "MULTISIG_REQUIRED", err.Error()))
 	case errors.Is(err, service.ErrChainNotConfigured):
 		response.WriteJSON(w, http.StatusServiceUnavailable, response.Err(http.StatusServiceUnavailable, "CHAIN_NOT_CONFIGURED", err.Error()))
 	case errors.Is(err, vault.ErrVaultNotFound):

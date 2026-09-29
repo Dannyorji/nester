@@ -139,6 +139,7 @@ type DatabaseConfig struct {
 }
 
 type StellarConfig struct {
+	network                   string
 	networkPassphrase         string
 	rpcURL                    string
 	horizonURL                string
@@ -148,6 +149,7 @@ type StellarConfig struct {
 	allocationStrategyAddress string
 	withdrawalSlippageBps     int
 	harvestDefaultCompound    bool
+	adminMultisigAddress      string
 }
 
 type AllocationConfig struct {
@@ -233,6 +235,7 @@ func Load() (*Config, error) {
 			connectionTimeout: loader.durationDefault("DATABASE_CONNECTION_TIMEOUT", 5*time.Second),
 		},
 		stellar: StellarConfig{
+			network:                   strings.ToLower(loader.stringDefault("STELLAR_NETWORK", "")),
 			networkPassphrase:         loader.requiredString("STELLAR_NETWORK_PASSPHRASE"),
 			rpcURL:                    loader.requiredURL("STELLAR_RPC_URL"),
 			horizonURL:                loader.requiredURL("STELLAR_HORIZON_URL"),
@@ -242,6 +245,7 @@ func Load() (*Config, error) {
 			allocationStrategyAddress: loader.stringDefault("STELLAR_ALLOCATION_STRATEGY_ADDRESS", ""),
 			withdrawalSlippageBps:     loader.intDefault("WITHDRAWAL_SLIPPAGE_BPS", 50),
 			harvestDefaultCompound:    loader.boolDefault("HARVEST_DEFAULT_COMPOUND", true),
+			adminMultisigAddress:      loader.stringDefault("STELLAR_ADMIN_MULTISIG_ADDRESS", ""),
 		},
 		intelligence: IntelligenceConfig{
 			baseURL:       loader.stringDefault("INTELLIGENCE_BASE_URL", loader.stringDefault("INTELLIGENCE_SERVICE_URL", "http://localhost:8000")),
@@ -756,6 +760,8 @@ func (c *Config) validate(loader *envLoader) {
 
 	validateAllowedOrigins(c.environment, c.allowedOrigins, loader)
 
+	c.validateStellarNetwork(loader)
+
 	if c.performance.snapshotInterval <= 0 {
 		loader.addError("PERFORMANCE_SNAPSHOT_INTERVAL must be greater than 0")
 	}
@@ -868,6 +874,28 @@ func (d DatabaseConfig) PoolSize() int {
 
 func (d DatabaseConfig) ConnectionTimeout() time.Duration {
 	return d.connectionTimeout
+}
+
+// Network is the declared STELLAR_NETWORK profile, or the network implied by
+// a well-known passphrase when STELLAR_NETWORK is unset. Empty when neither
+// identifies the network (private networks, test fixtures).
+func (s StellarConfig) Network() string {
+	if s.network != "" {
+		return s.network
+	}
+	n, _ := NetworkForPassphrase(s.networkPassphrase)
+	return n
+}
+
+// IsMainnet reports whether the API is configured for the public network.
+func (s StellarConfig) IsMainnet() bool {
+	return s.Network() == NetworkMainnet
+}
+
+// AdminMultisigAddress is the N-of-M multisig account contract that holds the
+// privileged contract roles on mainnet (#1374).
+func (s StellarConfig) AdminMultisigAddress() string {
+	return s.adminMultisigAddress
 }
 
 func (s StellarConfig) NetworkPassphrase() string {

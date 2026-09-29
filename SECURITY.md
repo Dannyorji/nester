@@ -73,6 +73,13 @@ Every role transfer is two-step (`transfer_role` / `accept_role`, cancellable vi
 
 **On-chain roles vs application roles:** the RBAC above lives entirely in the Soroban contracts. The `user_roles` tables in the API's Postgres migrations are a separate, application-level authorization layer (who can see what in the dashboard) and do not confer any on-chain authority — do not conflate the two when reasoning about contract security.
 
+## Mainnet Controls (issues #1371, #1373, #1374, #1375)
+
+- **Multisig custody:** on mainnet, `Admin`, `Upgrader`, `Treasurer` and `Guardian` are held by N-of-M multisig account contracts, never by one key. See [docs/security/admin-multisig.md](docs/security/admin-multisig.md).
+- **Timelocked upgrades:** every upgradeable contract, and every change to the orchestrator's canonical contract addresses, waits out a public delay (48h, or 7 days for the treasury). Pending changes can be read with `get_pending_upgrade` / `get_pending_update`.
+- **Network isolation:** the API refuses to boot if its passphrase, endpoints or credentials belong to a different Stellar network than `STELLAR_NETWORK` declares. See [deploy/mainnet/api.env.template](deploy/mainnet/api.env.template).
+- **Incident response:** paging, emergency halt, user comms and disclosure are covered in [docs/security/incident-response.md](docs/security/incident-response.md).
+
 ## Circuit Breaker (issue #817)
 
 The vault trips itself automatically rather than waiting for an operator to notice a problem. Four independently-configurable conditions escalate a graded severity (`Normal` → `Throttled` → `DepositsHalted` → `FullHalt`):

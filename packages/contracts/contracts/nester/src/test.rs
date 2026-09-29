@@ -2,9 +2,13 @@
 
 extern crate std;
 
-use soroban_sdk::{testutils::Address as _, Address, Bytes, BytesN, Env};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger},
+    Address, Bytes, BytesN, Env,
+};
 
 use nester_access_control::Role;
+use nester_common::{MIN_CONTRACT_UPDATE_DELAY, MIN_UPGRADE_DELAY_NESTER};
 
 use crate::{ContractKind, NesterContract, NesterContractClient, ProtocolInitConfig};
 
@@ -14,13 +18,15 @@ use crate::{ContractKind, NesterContract, NesterContractClient, ProtocolInitConf
 // initialize
 //   U: initialize_requires_admin_signature
 //   A: initialize_stores_all_addresses                     R: N/A (one-shot)
-// upgrade
-//   U: non_admin_cannot_upgrade; privileged_calls_require_signatures
-//   A: admin_reaches_wasm_validation_and_upgrades
-//   R: revoked_admin_cannot_call_admin_operations
-// update_contract
-//   U: non_admin_cannot_update_contract_reference; privileged_calls_require_signatures
-//   A: admin_can_update_contract_reference
+// propose_upgrade / cancel_upgrade (Upgrader)
+//   U: admin_without_upgrader_role_cannot_propose_upgrade; privileged_calls_require_signatures
+//   A: upgrade_executes_only_after_delay; upgrader_can_cancel_pending_upgrade
+//   R: revoked_upgrader_cannot_propose_upgrade
+// execute_upgrade (permissionless after ETA)
+//   A: upgrade_executes_only_after_delay
+// propose_update_contract / cancel_update_contract (Admin)
+//   U: non_admin_cannot_propose_contract_update; privileged_calls_require_signatures
+//   A: contract_update_is_not_live_until_delay
 //   R: revoked_admin_cannot_call_admin_operations
 // grant_role
 //   U: non_admin_cannot_grant_roles; privileged_calls_require_signatures
@@ -93,6 +99,23 @@ fn setup(env: &Env) -> (NesterContractClient<'_>, Address, ProtocolAddresses) {
     (client, admin, p)
 }
 
+fn advance(env: &Env, seconds: u64) {
+    env.ledger().with_mut(|l| l.timestamp += seconds);
+}
+
+/// Propose a contract reference change and let it mature.
+fn update_contract(
+    env: &Env,
+    client: &NesterContractClient,
+    admin: &Address,
+    kind: &ContractKind,
+    addr: &Address,
+) {
+    client.propose_update_contract(admin, kind, addr);
+    advance(env, MIN_CONTRACT_UPDATE_DELAY);
+    client.execute_update_contract(admin, kind);
+}
+
 fn uploaded_test_wasm_hash(env: &Env) -> BytesN<32> {
     // Soroban testutils accepts an empty Wasm blob for native-contract upgrade
     // lifecycle tests. This gives `upgrade` a ledger-backed hash without adding
@@ -149,9 +172,7 @@ fn initialize_requires_admin_signature() {
     let id = env.register_contract(None, NesterContract);
     let client = NesterContractClient::new(&env, &id);
 
-    assert!(client
-        .try_initialize(&admin, &p.clone().into())
-        .is_err());
+    assert!(client.try_initialize(&admin, &p.clone().into()).is_err());
     assert_eq!(
         client.version(),
         0,
@@ -192,41 +213,153 @@ fn treasury_panics_before_initialize() {
     client.treasury();
 }
 
-// -- upgrade ---------------------------------------------------------------
+// -- upgrade (timelocked) -------------------------------------------------
 
 #[test]
-fn admin_reaches_wasm_validation_and_upgrades() {
+fn upgrade_executes_only_after_delay() {
     let env = Env::default();
     let (client, admin, _) = setup(&env);
+    let upgrader = Address::generate(&env);
+    client.grant_role(&admin, &upgrader, &Role::Upgrader);
     let wasm_hash = uploaded_test_wasm_hash(&env);
 
-    client.upgrade(&admin, &wasm_hash);
+    let eta = env.ledger().timestamp() + MIN_UPGRADE_DELAY_NESTER;
+    client.propose_upgrade(&upgrader, &wasm_hash, &eta);
 
+    let pending = client.get_pending_upgrade().unwrap();
+    assert_eq!(pending.wasm_hash, wasm_hash);
+    assert_eq!(pending.eta, eta);
+
+    // One second short of the public window: still locked.
+    advance(&env, MIN_UPGRADE_DELAY_NESTER - 1);
+    let anyone = Address::generate(&env);
+    assert!(client.try_execute_upgrade(&anyone, &wasm_hash).is_err());
+    assert_eq!(client.version(), 1);
+
+    advance(&env, 1);
+    client.execute_upgrade(&anyone, &wasm_hash);
     assert_eq!(client.version(), 2);
+    assert!(client.get_pending_upgrade().is_none());
 }
 
 #[test]
-fn non_admin_cannot_upgrade() {
+fn propose_upgrade_rejects_eta_inside_delay() {
     let env = Env::default();
-    let (client, _, _) = setup(&env);
-    let outsider = Address::generate(&env);
+    let (client, admin, _) = setup(&env);
+    client.grant_role(&admin, &admin, &Role::Upgrader);
     let wasm_hash = uploaded_test_wasm_hash(&env);
 
-    assert!(client.try_upgrade(&outsider, &wasm_hash).is_err());
+    let too_soon = env.ledger().timestamp() + MIN_UPGRADE_DELAY_NESTER - 1;
+    assert!(client
+        .try_propose_upgrade(&admin, &wasm_hash, &too_soon)
+        .is_err());
+    assert!(client.get_pending_upgrade().is_none());
+}
+
+#[test]
+fn execute_upgrade_rejects_mismatched_hash() {
+    let env = Env::default();
+    let (client, admin, _) = setup(&env);
+    client.grant_role(&admin, &admin, &Role::Upgrader);
+    let wasm_hash = uploaded_test_wasm_hash(&env);
+    let other = BytesN::from_array(&env, &[7u8; 32]);
+
+    let eta = env.ledger().timestamp() + MIN_UPGRADE_DELAY_NESTER;
+    client.propose_upgrade(&admin, &wasm_hash, &eta);
+    advance(&env, MIN_UPGRADE_DELAY_NESTER);
+
+    assert!(client.try_execute_upgrade(&admin, &other).is_err());
     assert_eq!(client.version(), 1);
 }
 
-// ── update_contract ───────────────────────────────────────────────────────────
-
 #[test]
-fn admin_can_update_contract_reference() {
+fn upgrader_can_cancel_pending_upgrade() {
     let env = Env::default();
     let (client, admin, _) = setup(&env);
+    client.grant_role(&admin, &admin, &Role::Upgrader);
+    let wasm_hash = uploaded_test_wasm_hash(&env);
+
+    let eta = env.ledger().timestamp() + MIN_UPGRADE_DELAY_NESTER;
+    client.propose_upgrade(&admin, &wasm_hash, &eta);
+    client.cancel_upgrade(&admin);
+    assert!(client.get_pending_upgrade().is_none());
+
+    advance(&env, MIN_UPGRADE_DELAY_NESTER);
+    assert!(client.try_execute_upgrade(&admin, &wasm_hash).is_err());
+    assert_eq!(client.version(), 1);
+}
+
+#[test]
+fn admin_without_upgrader_role_cannot_propose_upgrade() {
+    let env = Env::default();
+    let (client, admin, _) = setup(&env);
+    let wasm_hash = uploaded_test_wasm_hash(&env);
+    let eta = env.ledger().timestamp() + MIN_UPGRADE_DELAY_NESTER;
+
+    assert!(client
+        .try_propose_upgrade(&admin, &wasm_hash, &eta)
+        .is_err());
+    assert!(client.get_pending_upgrade().is_none());
+}
+
+#[test]
+fn revoked_upgrader_cannot_propose_upgrade() {
+    let env = Env::default();
+    let (client, admin, _) = setup(&env);
+    let upgrader = Address::generate(&env);
+    client.grant_role(&admin, &upgrader, &Role::Upgrader);
+    client.revoke_role(&admin, &upgrader, &Role::Upgrader);
+    let wasm_hash = uploaded_test_wasm_hash(&env);
+    let eta = env.ledger().timestamp() + MIN_UPGRADE_DELAY_NESTER;
+
+    assert!(client
+        .try_propose_upgrade(&upgrader, &wasm_hash, &eta)
+        .is_err());
+}
+
+// ── update_contract (timelocked) ──────────────────────────────────────────────
+
+#[test]
+fn contract_update_is_not_live_until_delay() {
+    let env = Env::default();
+    let (client, admin, p) = setup(&env);
     let new_vault = Address::generate(&env);
 
-    client.update_contract(&admin, &ContractKind::VaultUsdc, &new_vault);
+    let eta = client.propose_update_contract(&admin, &ContractKind::VaultUsdc, &new_vault);
+    assert_eq!(eta, env.ledger().timestamp() + MIN_CONTRACT_UPDATE_DELAY);
+    let pending = client.get_pending_update(&ContractKind::VaultUsdc).unwrap();
+    assert_eq!(pending.new_address, new_vault);
 
+    // Proposed but not yet live: getters still return the old address.
+    assert_eq!(client.vault_usdc(), p.vault_usdc);
+    advance(&env, MIN_CONTRACT_UPDATE_DELAY - 1);
+    assert!(client
+        .try_execute_update_contract(&admin, &ContractKind::VaultUsdc)
+        .is_err());
+    assert_eq!(client.vault_usdc(), p.vault_usdc);
+
+    advance(&env, 1);
+    let anyone = Address::generate(&env);
+    client.execute_update_contract(&anyone, &ContractKind::VaultUsdc);
     assert_eq!(client.vault_usdc(), new_vault);
+    assert!(client
+        .get_pending_update(&ContractKind::VaultUsdc)
+        .is_none());
+}
+
+#[test]
+fn admin_can_cancel_pending_contract_update() {
+    let env = Env::default();
+    let (client, admin, p) = setup(&env);
+
+    client.propose_update_contract(&admin, &ContractKind::Treasury, &Address::generate(&env));
+    client.cancel_update_contract(&admin, &ContractKind::Treasury);
+    advance(&env, MIN_CONTRACT_UPDATE_DELAY);
+
+    assert!(client
+        .try_execute_update_contract(&admin, &ContractKind::Treasury)
+        .is_err());
+    assert_eq!(client.treasury(), p.treasury);
 }
 
 #[test]
@@ -235,7 +368,13 @@ fn update_contract_does_not_affect_other_references() {
     let (client, admin, p) = setup(&env);
     let new_vault_xlm = Address::generate(&env);
 
-    client.update_contract(&admin, &ContractKind::VaultXlm, &new_vault_xlm);
+    update_contract(
+        &env,
+        &client,
+        &admin,
+        &ContractKind::VaultXlm,
+        &new_vault_xlm,
+    );
 
     // Only VaultXlm changed; everything else is unchanged.
     assert_eq!(client.vault_xlm(), new_vault_xlm);
@@ -262,7 +401,7 @@ fn update_contract_covers_all_kinds() {
 
     for kind in kinds {
         let new_addr = Address::generate(&env);
-        client.update_contract(&admin, &kind, &new_addr);
+        update_contract(&env, &client, &admin, &kind, &new_addr);
         // Confirm each getter now returns the updated address.
         let actual = match kind {
             ContractKind::VaultUsdc => client.vault_usdc(),
@@ -278,13 +417,15 @@ fn update_contract_covers_all_kinds() {
 }
 
 #[test]
-#[should_panic]
-fn non_admin_cannot_update_contract_reference() {
+fn non_admin_cannot_propose_contract_update() {
     let env = Env::default();
     let (client, _, _) = setup(&env);
     let outsider = Address::generate(&env);
 
-    client.update_contract(&outsider, &ContractKind::Treasury, &Address::generate(&env));
+    assert!(client
+        .try_propose_update_contract(&outsider, &ContractKind::Treasury, &Address::generate(&env))
+        .is_err());
+    assert!(client.get_pending_update(&ContractKind::Treasury).is_none());
 }
 
 // ── Access control ────────────────────────────────────────────────────────────
@@ -334,10 +475,16 @@ fn two_step_admin_transfer() {
     assert!(!client.has_role(&admin, &Role::Admin));
 
     let replacement = Address::generate(&env);
-    client.update_contract(&new_admin, &ContractKind::Treasury, &replacement);
+    update_contract(
+        &env,
+        &client,
+        &new_admin,
+        &ContractKind::Treasury,
+        &replacement,
+    );
     assert_eq!(client.treasury(), replacement);
     assert!(client
-        .try_update_contract(&admin, &ContractKind::Treasury, &Address::generate(&env),)
+        .try_propose_update_contract(&admin, &ContractKind::Treasury, &Address::generate(&env),)
         .is_err());
 }
 
@@ -390,7 +537,7 @@ fn revoked_admin_cannot_call_admin_operations() {
     client.revoke_role(&remaining_admin, &initial_admin, &Role::Admin);
 
     assert!(client
-        .try_update_contract(
+        .try_propose_update_contract(
             &initial_admin,
             &ContractKind::Treasury,
             &Address::generate(&env),
@@ -405,10 +552,6 @@ fn revoked_admin_cannot_call_admin_operations() {
     assert!(client
         .try_transfer_admin(&initial_admin, &Address::generate(&env))
         .is_err());
-
-    let wasm_hash = uploaded_test_wasm_hash(&env);
-    assert!(client.try_upgrade(&initial_admin, &wasm_hash).is_err());
-    assert_eq!(client.version(), 1);
 }
 
 #[test]
@@ -418,13 +561,15 @@ fn privileged_calls_require_signatures() {
     let operator = Address::generate(&env);
     let proposed_admin = Address::generate(&env);
     let wasm_hash = uploaded_test_wasm_hash(&env);
+    let eta = env.ledger().timestamp() + MIN_UPGRADE_DELAY_NESTER;
     client.grant_role(&admin, &operator, &Role::Operator);
+    client.grant_role(&admin, &admin, &Role::Upgrader);
     client.transfer_admin(&admin, &proposed_admin);
 
     env.mock_auths(&[]);
 
     assert!(client
-        .try_update_contract(&admin, &ContractKind::Treasury, &Address::generate(&env),)
+        .try_propose_update_contract(&admin, &ContractKind::Treasury, &Address::generate(&env),)
         .is_err());
     assert!(client
         .try_grant_role(&admin, &Address::generate(&env), &Role::Operator)
@@ -436,5 +581,8 @@ fn privileged_calls_require_signatures() {
         .try_transfer_admin(&admin, &Address::generate(&env))
         .is_err());
     assert!(client.try_accept_admin(&proposed_admin).is_err());
-    assert!(client.try_upgrade(&admin, &wasm_hash).is_err());
+    assert!(client
+        .try_propose_upgrade(&admin, &wasm_hash, &eta)
+        .is_err());
+    assert!(client.try_cancel_upgrade(&admin).is_err());
 }

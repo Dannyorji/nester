@@ -1,11 +1,12 @@
 #[cfg(test)]
 mod test {
     use crate::{RecurringDepositContract, RecurringDepositContractClient};
+    use nester_access_control::Role;
     use nester_common::ContractError as Error;
+    use nester_common::MIN_UPGRADE_DELAY_RECURRING_DEPOSIT;
     use nester_test_utils::harness::NesterHarness;
     use soroban_sdk::{
-        testutils::Address as _, testutils::Ledger as _, Address, ConversionError, Env,
-        InvokeError,
+        testutils::Address as _, testutils::Ledger as _, Address, ConversionError, Env, InvokeError,
     };
 
     fn setup_contract() -> (Env, Address, RecurringDepositContractClient<'static>) {
@@ -41,7 +42,8 @@ mod test {
     }
 
     fn advance_time(env: &Env, seconds: u64) {
-        env.ledger().set_timestamp(env.ledger().timestamp() + seconds);
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + seconds);
     }
 
     fn contract_err_u64(
@@ -52,7 +54,8 @@ mod test {
 
     fn contract_err_void(
         err: Error,
-    ) -> Result<Result<(), soroban_sdk::ConversionError>, Result<soroban_sdk::Error, InvokeError>> {
+    ) -> Result<Result<(), soroban_sdk::ConversionError>, Result<soroban_sdk::Error, InvokeError>>
+    {
         Err(Ok(soroban_sdk::Error::from_contract_error(err as u32)))
     }
 
@@ -69,7 +72,7 @@ mod test {
             &token,
             &10000i128,                                    // amount_per_period
             &(7 * 24 * 3600u64),                           // weekly (period_secs)
-            &env.ledger().timestamp(),                    // start_at
+            &env.ledger().timestamp(),                     // start_at
             &(env.ledger().timestamp() + 365 * 24 * 3600), // expires_at (1 year)
             &(52 * 10000i128),                             // max_total (52 weeks worth)
         );
@@ -484,5 +487,66 @@ mod test {
             &5000i128,
         );
         assert_eq!(result, contract_err_u64(Error::InvalidAmount));
+    }
+
+    // ── Upgrade (timelocked, #1373) ─────────────────────────────────────────
+
+    fn setup_upgrade() -> (Env, RecurringDepositContractClient<'static>, Address) {
+        let env = Env::default();
+        env.ledger().set_timestamp(1000);
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RecurringDepositContract);
+        let client = RecurringDepositContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        (env, client, admin)
+    }
+
+    #[test]
+    fn upgrade_requires_upgrader_role() {
+        let (env, client, admin) = setup_upgrade();
+        let hash = soroban_sdk::BytesN::from_array(&env, &[1u8; 32]);
+        let eta = env.ledger().timestamp() + MIN_UPGRADE_DELAY_RECURRING_DEPOSIT;
+
+        // Neither a stranger nor a bare Admin may propose or cancel.
+        let stranger = Address::generate(&env);
+        assert!(client.try_propose_upgrade(&stranger, &hash, &eta).is_err());
+        assert!(client.try_propose_upgrade(&admin, &hash, &eta).is_err());
+        assert!(client.get_pending_upgrade().is_none());
+
+        client.grant_role(&admin, &admin, &Role::Upgrader);
+        client.propose_upgrade(&admin, &hash, &eta);
+        assert!(client.try_cancel_upgrade(&stranger).is_err());
+        assert_eq!(client.get_pending_upgrade().unwrap().eta, eta);
+    }
+
+    #[test]
+    fn upgrade_enforces_minimum_delay() {
+        let (env, client, admin) = setup_upgrade();
+        client.grant_role(&admin, &admin, &Role::Upgrader);
+        let hash = soroban_sdk::BytesN::from_array(&env, &[1u8; 32]);
+
+        let too_soon = env.ledger().timestamp() + MIN_UPGRADE_DELAY_RECURRING_DEPOSIT - 1;
+        assert!(client
+            .try_propose_upgrade(&admin, &hash, &too_soon)
+            .is_err());
+
+        let eta = env.ledger().timestamp() + MIN_UPGRADE_DELAY_RECURRING_DEPOSIT;
+        client.propose_upgrade(&admin, &hash, &eta);
+        advance_time(&env, MIN_UPGRADE_DELAY_RECURRING_DEPOSIT - 1);
+        assert!(client.try_execute_upgrade(&admin, &hash).is_err());
+        assert!(client.get_pending_upgrade().is_some());
+    }
+
+    #[test]
+    fn upgrader_can_cancel_pending_upgrade() {
+        let (env, client, admin) = setup_upgrade();
+        client.grant_role(&admin, &admin, &Role::Upgrader);
+        let hash = soroban_sdk::BytesN::from_array(&env, &[1u8; 32]);
+        let eta = env.ledger().timestamp() + MIN_UPGRADE_DELAY_RECURRING_DEPOSIT;
+
+        client.propose_upgrade(&admin, &hash, &eta);
+        client.cancel_upgrade(&admin);
+        assert!(client.get_pending_upgrade().is_none());
     }
 }
