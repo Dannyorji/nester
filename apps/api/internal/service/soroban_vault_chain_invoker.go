@@ -31,6 +31,14 @@ func NewSorobanVaultChainInvoker(
 	}, nil
 }
 
+// WithSubmissionPipeline enables idempotent, retry-safe submission for the
+// mutating vault operations below (deposit, withdraw, harvest, set-weights,
+// emergency-withdraw-all) — see stellar.ContractInvoker.WithSubmissionPipeline.
+func (s *SorobanVaultChainInvoker) WithSubmissionPipeline(pipeline *stellar.SubmissionPipeline) *SorobanVaultChainInvoker {
+	s.invoker.WithSubmissionPipeline(pipeline)
+	return s
+}
+
 func (s *SorobanVaultChainInvoker) PauseVault(ctx context.Context, contractAddress string) error {
 	return s.invoker.InvokeVoidFunction(ctx, contractAddress, "pause")
 }

@@ -211,6 +211,23 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("init chain invoker: %w", err)
 		}
+
+		// Routes mainnet deposit/withdraw/harvest/rebalance submissions
+		// through SubmissionPipeline.SubmitIdempotent so a client or
+		// network retry after an RPC timeout is deduped against the
+		// original attempt instead of landing a duplicate on-chain
+		// transaction (see internal/stellar/retry_policy.go).
+		submissionPipeline := stellarpkg.NewSubmissionPipeline(db).WithRPC(cfg.Stellar().RPCURL(), cfg.Stellar().HorizonURL())
+		inv.WithSubmissionPipeline(submissionPipeline)
+
+		go func() {
+			recoverCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			if recErr := submissionPipeline.RecoverOnStartup(recoverCtx); recErr != nil {
+				baseLogger.Error("chain submission startup recovery failed", "error", recErr)
+			}
+		}()
+
 		chainInvoker = inv
 		vaultService.SetDepositInvoker(inv)
 	}
