@@ -60,6 +60,16 @@ func TestRecordDepositUpdatesBalancesAtomically(t *testing.T) {
 
 	// RecordDeposit now runs inside a transaction and also inserts a ledger entry.
 	mock.ExpectBegin()
+	// Vault cap check (nester#1316): locks the vaults row and reads
+	// soft_capacity before crediting. No cap set here, so it's a no-op.
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT current_balance, soft_capacity FROM vaults WHERE id = $1 AND deleted_at IS NULL FOR UPDATE`)).
+		WithArgs(vaultID.String()).
+		WillReturnRows(sqlmock.NewRows([]string{"current_balance", "soft_capacity"}).AddRow("0", nil))
+	// Per-user daily cap check (nester#1316): locks the user row. No cap set
+	// here, so the rolling-total query is skipped.
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT daily_deposit_cap FROM users WHERE id = $1 FOR UPDATE`)).
+		WithArgs(userID.String()).
+		WillReturnRows(sqlmock.NewRows([]string{"daily_deposit_cap"}).AddRow(nil))
 	mock.ExpectExec(regexp.QuoteMeta(`UPDATE vaults
 		 SET total_deposited = total_deposited + $2::numeric,
 		     current_balance = current_balance + $2::numeric,
@@ -73,6 +83,26 @@ func TestRecordDepositUpdatesBalancesAtomically(t *testing.T) {
 		) VALUES ($1, $2, 'deposit', $3::numeric, NULLIF($4, ''), $5::numeric, $6::numeric, $7::numeric)`)).
 		WithArgs(vaultID.String(), userID.String(), "25.5", "", "25.5", "1", "0").
 		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	// The deposit also posts a balanced double-entry set inside the same
+	// transaction: three account lookups (user position, vault pool, system
+	// suspense), then an entry + balance upsert per account. All three
+	// accounts already exist here, so each lookup returns its id and no
+	// ledger_accounts INSERT is issued.
+	userAccountID := uuid.New()
+	vaultAccountID := uuid.New()
+	suspenseAccountID := uuid.New()
+	for _, accountID := range []uuid.UUID{userAccountID, vaultAccountID, suspenseAccountID} {
+		mock.ExpectQuery(regexp.QuoteMeta(`SELECT id FROM ledger_accounts`)).
+			WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(accountID.String()))
+	}
+	for range []uuid.UUID{userAccountID, vaultAccountID, suspenseAccountID} {
+		mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO ledger_entries`)).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO ledger_balances`)).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+	}
+
 	mock.ExpectCommit()
 
 	record := vault.TransactionRecord{

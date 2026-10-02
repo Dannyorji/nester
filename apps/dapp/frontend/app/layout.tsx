@@ -11,10 +11,16 @@ import { ReactQueryProvider } from "@/components/react-query-provider";
 import { OfflineBanner } from "@/components/offline-banner";
 import { SettingsProvider } from "@/context/settings-context";
 import { LocaleProvider } from "@/context/locale-context";
-import { OnboardingProvider } from "@/hooks/useOnboarding";
 import { NetworkProvider } from "@/context/NetworkProvider";
 import { NetworkBanner } from "@/components/network/NetworkSelector";
 import { ServiceWorkerRegister } from "@/components/service-worker-register";
+import {
+    E2E_HARNESS_CHANNELS,
+    E2E_HARNESS_TOKEN,
+    E2E_HARNESS_ENABLED,
+    E2E_HARNESS_HEARTBEAT_INTERVAL_MS,
+    E2E_HARNESS_HEARTBEAT_TIMEOUT_MS,
+} from "@/lib/e2e-harness";
 import "./globals.css";
 
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
@@ -22,7 +28,7 @@ const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
 export const metadata: Metadata = {
     title: "Nester | DApp",
     description:
-        "Decentralized savings and instant fiat settlements powered by Stellar.",
+        "Decentralized savings and yield investing powered by Stellar.",
     manifest: "/manifest.webmanifest",
     icons: {
         icon: "/logo.png",
@@ -36,9 +42,6 @@ export const viewport: Viewport = {
 
 import { ToastProvider } from "@/components/ui/toast/toast-provider";
 
-import { ConsentProvider } from "@/context/consent-context";
-import { ConsentGatedPrometheus } from "@/components/consent-gated-prometheus";
-import { CookieConsentBanner } from "@/components/cookie-consent-banner";
 
 const themeInitScript = `
 (function() {
@@ -77,7 +80,6 @@ export default function RootLayout({
                 className={`${inter.className} ${inter.variable} antialiased`}
             >
                 <ToastProvider>
-                    <ConsentProvider>
                         <ReactQueryProvider>
                             <NetworkProvider>
                                 <LocaleProvider>
@@ -89,13 +91,30 @@ export default function RootLayout({
                                                     <OfflineBanner />
                                                     <NetworkBanner />
                                                     <PortfolioProvider>
-                                                        <WebSocketProvider>
-                                                            <OnboardingProvider>
+                                                        <WebSocketProvider
+                                                            channelsOverride={
+                                                                E2E_HARNESS_ENABLED
+                                                                    ? E2E_HARNESS_CHANNELS
+                                                                    : undefined
+                                                            }
+                                                            tokenOverride={
+                                                                E2E_HARNESS_ENABLED
+                                                                    ? E2E_HARNESS_TOKEN
+                                                                    : undefined
+                                                            }
+                                                            heartbeatInterval={
+                                                                E2E_HARNESS_ENABLED
+                                                                    ? E2E_HARNESS_HEARTBEAT_INTERVAL_MS
+                                                                    : undefined
+                                                            }
+                                                            heartbeatTimeout={
+                                                                E2E_HARNESS_ENABLED
+                                                                    ? E2E_HARNESS_HEARTBEAT_TIMEOUT_MS
+                                                                    : undefined
+                                                            }
+                                                        >
                                                                 {children}
                                                                 <NotificationsToaster />
-                                                                <ConsentGatedPrometheus />
-                                                                <CookieConsentBanner />
-                                                            </OnboardingProvider>
                                                         </WebSocketProvider>
                                                     </PortfolioProvider>
                                                 </NotificationsProvider>
@@ -105,7 +124,6 @@ export default function RootLayout({
                                 </LocaleProvider>
                             </NetworkProvider>
                         </ReactQueryProvider>
-                    </ConsentProvider>
                 </ToastProvider>
             </body>
         </html>

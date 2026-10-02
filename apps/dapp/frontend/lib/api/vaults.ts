@@ -75,7 +75,55 @@ export interface HarvestResult {
   tx_hash?: string;
 }
 
+function newIdempotencyKey(): string {
+  return crypto.randomUUID();
+}
+
+
+/** Server-derived position for the signed-in user in a single vault. */
+export interface UserVaultPosition {
+  vault_id: string;
+  user_id: string;
+  total_deposited_usdc: string;
+  shares_held: string;
+  current_value_usdc: string;
+  unrealized_pnl_usdc: string;
+  unrealized_pnl_pct: string;
+  fees_paid_usdc: string;
+  first_deposit_at: string | null;
+  last_activity_at: string | null;
+}
+
+export interface RegisterTransactionInput {
+  vault_id: string;
+  type: "deposit" | "withdrawal";
+  /** Decimal string — the API parses this exactly, so never send a float. */
+  amount: string;
+  currency: string;
+  tx_hash: string;
+}
+
 export const vaultsApi = {
+  /**
+   * Records a signed on-chain transaction against the vault.
+   *
+   * The row is created as "pending" and stays that way until the API's
+   * reconciliation poller confirms the hash against Horizon and verifies the
+   * amount actually moved on-chain, so calling this cannot credit a deposit
+   * that did not happen. Registering is what makes a position outlive the
+   * browser: positions are derived server-side from these rows.
+   */
+  registerTransaction: (input: RegisterTransactionInput) =>
+    apiRequest<Transaction>(`/transactions`, {
+      method: "POST",
+      headers: { "Idempotency-Key": newIdempotencyKey() },
+      body: JSON.stringify(input),
+    }),
+
+  /** The signed-in user's position in one vault, derived from indexed rows. */
+  getMyPosition: (vaultId: string) =>
+    apiRequest<UserVaultPosition>(`/vaults/${vaultId}/my-position`),
+
   getProjection: (vaultId: string) =>
     apiRequest<Projection>(`/vaults/${vaultId}/projection`),
 
@@ -101,12 +149,14 @@ export const vaultsApi = {
   harvest: (vaultId: string, compound: boolean) =>
     apiRequest<HarvestResult>(`/vaults/${vaultId}/harvest`, {
       method: "POST",
+      headers: { "Idempotency-Key": newIdempotencyKey() },
       body: JSON.stringify({ compound }),
     }),
 
   applyRebalance: (vaultId: string, allocations: AllocationPct[]) =>
     apiRequest<unknown>(`/vaults/${vaultId}/rebalance`, {
       method: "POST",
+      headers: { "Idempotency-Key": newIdempotencyKey() },
       body: JSON.stringify({ allocations }),
     }),
 }

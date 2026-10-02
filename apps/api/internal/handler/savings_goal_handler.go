@@ -14,7 +14,6 @@ import (
 
 	"github.com/suncrestlabs/nester/apps/api/internal/auth"
 	"github.com/suncrestlabs/nester/apps/api/internal/domain/goalnotification"
-	"github.com/suncrestlabs/nester/apps/api/internal/domain/intelligence"
 	"github.com/suncrestlabs/nester/apps/api/internal/domain/savingsgoal"
 	"github.com/suncrestlabs/nester/apps/api/internal/domain/savingsschedule"
 	"github.com/suncrestlabs/nester/apps/api/internal/service"
@@ -44,13 +43,13 @@ type SavingsGoalManager interface {
 	ListContributions(ctx context.Context, userID, goalID uuid.UUID, params listquery.PageParams) ([]savingsgoal.GoalContribution, int, string, error)
 	ListTemplates(ctx context.Context) ([]savingsgoal.GoalTemplate, error)
 	CreateFromTemplate(ctx context.Context, userID uuid.UUID, in service.CreateFromTemplateInput) (savingsgoal.SavingsGoal, error)
+	UpdateNotes(ctx context.Context, userID, goalID uuid.UUID, notes string) (savingsgoal.SavingsGoal, error)
 }
 
 type SavingsGoalHandler struct {
-	svc              SavingsGoalManager
-	schedules        SavingsScheduleActiveReader
-	notifyPrefs      GoalNotificationPreferenceManager
-	coachingProvider GoalCoachingProvider
+	svc         SavingsGoalManager
+	schedules   SavingsScheduleActiveReader
+	notifyPrefs GoalNotificationPreferenceManager
 }
 
 type SavingsScheduleActiveReader interface {
@@ -63,12 +62,6 @@ type GoalNotificationPreferenceManager interface {
 	Update(ctx context.Context, userID, goalID uuid.UUID, in service.UpdateGoalNotificationPreferenceInput) (goalnotification.Preference, error)
 }
 
-// GoalCoachingProvider requests an AI-generated progress assessment and
-// deposit schedule for a savings goal from the intelligence service (#112).
-type GoalCoachingProvider interface {
-	GetGoalCoaching(ctx context.Context, request intelligence.CoachingRequest) (*intelligence.CoachingResponse, error)
-}
-
 func NewSavingsGoalHandler(svc SavingsGoalManager, schedules SavingsScheduleActiveReader) *SavingsGoalHandler {
 	return &SavingsGoalHandler{svc: svc, schedules: schedules}
 }
@@ -77,12 +70,6 @@ func NewSavingsGoalHandler(svc SavingsGoalManager, schedules SavingsScheduleActi
 // preference endpoints (mute/frequency). Left unset, those endpoints respond 501.
 func (h *SavingsGoalHandler) SetNotificationPreferenceManager(m GoalNotificationPreferenceManager) {
 	h.notifyPrefs = m
-}
-
-// SetCoachingProvider wires the AI coaching backend. Left nil, the
-// /coaching endpoint responds 503 rather than failing to construct the handler.
-func (h *SavingsGoalHandler) SetCoachingProvider(p GoalCoachingProvider) {
-	h.coachingProvider = p
 }
 
 func (h *SavingsGoalHandler) Register(mux *http.ServeMux) {
@@ -101,8 +88,6 @@ func (h *SavingsGoalHandler) Register(mux *http.ServeMux) {
 	// Per-goal notification preferences (mute/digest frequency).
 	mux.HandleFunc("GET /api/v1/users/savings-goals/{id}/notification-preferences", h.getNotificationPreference)
 	mux.HandleFunc("PATCH /api/v1/users/savings-goals/{id}/notification-preferences", h.updateNotificationPreference)
-	// #112 AI progress coaching
-	mux.HandleFunc("GET /api/v1/users/savings-goals/{id}/coaching", h.coaching)
 	// #716 manual completion
 	mux.HandleFunc("POST /api/v1/users/savings-goals/{id}/complete", h.complete)
 	// #684 archive / #721 unarchive
@@ -299,60 +284,6 @@ func (h *SavingsGoalHandler) get(w http.ResponseWriter, r *http.Request) {
 type savingsGoalDetail struct {
 	savingsgoal.SavingsGoal
 	ActiveSchedule *savingsschedule.SavingsSchedule `json:"active_schedule,omitempty"`
-}
-
-// coaching returns an on-demand AI-generated progress assessment and deposit
-// schedule for the goal (#112). The same underlying call is made on a
-// weekly cadence by GoalCoachingScheduler so users get a fresh nudge even
-// without opening the app.
-func (h *SavingsGoalHandler) coaching(w http.ResponseWriter, r *http.Request) {
-	userID, ok := h.authenticatedUserID(w, r)
-	if !ok {
-		return
-	}
-	goalID, err := uuid.Parse(r.PathValue("id"))
-	if err != nil {
-		response.WriteJSON(w, http.StatusBadRequest, response.ValidationErr("goal id must be a valid UUID"))
-		return
-	}
-	if h.coachingProvider == nil {
-		response.WriteJSON(w, http.StatusServiceUnavailable, response.Err(http.StatusServiceUnavailable, "UNAVAILABLE", "coaching service not configured"))
-		return
-	}
-	goal, err := h.svc.Get(r.Context(), userID, goalID)
-	if err != nil {
-		h.writeError(w, r, err)
-		return
-	}
-
-	result, err := h.coachingProvider.GetGoalCoaching(r.Context(), goalCoachingRequest(goal))
-	if err != nil {
-		logpkg.FromContext(r.Context()).Error("goal coaching failed", "error", err.Error())
-		response.WriteJSON(w, http.StatusBadGateway, response.Err(http.StatusBadGateway, "UPSTREAM_ERROR", err.Error()))
-		return
-	}
-	response.WriteJSON(w, http.StatusOK, response.OK(result))
-}
-
-// goalCoachingRequest builds the intelligence service request payload from an
-// already-progress-enriched savings goal.
-func goalCoachingRequest(goal savingsgoal.SavingsGoal) intelligence.CoachingRequest {
-	targetAmount, _ := goal.TargetAmount.Float64()
-	currentAmount, _ := goal.CurrentAmount.Float64()
-	return intelligence.CoachingRequest{
-		Goal: intelligence.SavingsGoalContext{
-			ID:            goal.ID.String(),
-			TargetAmount:  targetAmount,
-			Currency:      goal.Currency,
-			Deadline:      goal.Deadline.Format(time.RFC3339),
-			Description:   goal.Description,
-			CurrentAmount: currentAmount,
-			ProgressPct:   goal.ProgressPct,
-		},
-		Portfolio: intelligence.PortfolioContext{
-			TotalBalanceUSD: currentAmount,
-		},
-	}
 }
 
 func (h *SavingsGoalHandler) list(w http.ResponseWriter, r *http.Request) {
@@ -795,7 +726,9 @@ func (h *SavingsGoalHandler) writeError(w http.ResponseWriter, r *http.Request, 
 	case errors.Is(err, savingsgoal.ErrRecoveryWindowExpired):
 		response.WriteJSON(w, http.StatusConflict, response.Err(http.StatusConflict, "RECOVERY_WINDOW_EXPIRED", err.Error()))
 	case errors.Is(err, savingsgoal.ErrUnauthorized):
-		response.WriteJSON(w, http.StatusForbidden, response.Err(http.StatusForbidden, "FORBIDDEN", "vault does not belong to you"))
+		// 404, not 403 — "vault does not belong to you" confirms the vault
+		// exists to a caller who does not own it (#1101).
+		response.WriteJSON(w, http.StatusNotFound, response.NotFound("vault"))
 	case errors.Is(err, savingsgoal.ErrInvalidGoal):
 		response.WriteJSON(w, http.StatusBadRequest, response.ValidationErr(err.Error()))
 	case errors.Is(err, goalnotification.ErrInvalidPreference):

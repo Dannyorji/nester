@@ -3,10 +3,13 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/suncrestlabs/nester/apps/api/internal/domain/jobqueue"
 )
@@ -45,10 +48,15 @@ func TestJobRepository_EnqueueDequeueComplete(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 
+	// RunAt is pinned to the same instant the dequeue below uses as its
+	// cursor. Left unset, Enqueue stamps time.Now() a few microseconds after
+	// `now` was captured, and next_run_at <= now is then false on any clock
+	// with sub-millisecond resolution.
 	job, created, err := repo.Enqueue(ctx, jobqueue.EnqueueInput{
 		Type:          "harvest",
 		Payload:       json.RawMessage(`{"vault_id":"v1"}`),
 		CorrelationID: "corr-1",
+		RunAt:         now,
 	})
 	if err != nil || !created {
 		t.Fatalf("enqueue: created=%v err=%v", created, err)
@@ -80,6 +88,70 @@ func TestJobRepository_EnqueueDequeueComplete(t *testing.T) {
 
 	if err := repo.Complete(ctx, job.ID, json.RawMessage(`{"ok":true}`)); err != nil {
 		t.Fatalf("complete: %v", err)
+	}
+}
+
+func TestJobRepository_ListDeadAndManualRetry(t *testing.T) {
+	repo := setupJobRepo(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	// RunAt is pinned to the same instant the dequeue below uses as its
+	// cursor; see the comment on this pattern in
+	// TestJobRepository_EnqueueDequeueComplete above.
+	job, _, err := repo.Enqueue(ctx, jobqueue.EnqueueInput{Type: "harvest", MaxAttempts: 1, RunAt: now})
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	leased, err := repo.Dequeue(ctx, jobqueue.DequeueParams{Type: "harvest", Limit: 1, Lease: time.Minute, Now: now})
+	if err != nil || len(leased) != 1 {
+		t.Fatalf("dequeue: %d jobs, err=%v", len(leased), err)
+	}
+	if err := repo.DeadLetter(ctx, job.ID, "permanent failure"); err != nil {
+		t.Fatalf("dead letter: %v", err)
+	}
+
+	dead, err := repo.ListDead(ctx, 10, 0)
+	if err != nil {
+		t.Fatalf("list dead: %v", err)
+	}
+	if len(dead) != 1 || dead[0].ID != job.ID {
+		t.Fatalf("list dead = %+v, want [job %s]", dead, job.ID)
+	}
+	if dead[0].LastError != "permanent failure" {
+		t.Fatalf("last_error = %q, want %q", dead[0].LastError, "permanent failure")
+	}
+
+	// Retrying a job that isn't dead is a no-op error.
+	if err := repo.ManualRetry(ctx, uuid.New(), now); !errors.Is(err, jobqueue.ErrNotFound) {
+		t.Fatalf("ManualRetry(unknown id) = %v, want ErrNotFound", err)
+	}
+
+	if err := repo.ManualRetry(ctx, job.ID, now); err != nil {
+		t.Fatalf("manual retry: %v", err)
+	}
+
+	got, err := repo.GetByID(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("get by id: %v", err)
+	}
+	if got.Status != jobqueue.StatusPending || got.Attempts != 0 || got.LastError != "" {
+		t.Fatalf("after manual retry: status=%s attempts=%d last_error=%q", got.Status, got.Attempts, got.LastError)
+	}
+
+	dead, err = repo.ListDead(ctx, 10, 0)
+	if err != nil {
+		t.Fatalf("list dead after retry: %v", err)
+	}
+	if len(dead) != 0 {
+		t.Fatalf("dead-letter queue should be empty after retry, got %d", len(dead))
+	}
+}
+
+func TestJobRepository_GetByIDNotFound(t *testing.T) {
+	repo := setupJobRepo(t)
+	if _, err := repo.GetByID(context.Background(), uuid.New()); !errors.Is(err, jobqueue.ErrNotFound) {
+		t.Fatalf("GetByID(unknown) = %v, want ErrNotFound", err)
 	}
 }
 
@@ -115,7 +187,7 @@ func TestJobRepository_LeaseExpiryReclaim(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 
-	_, _, err := repo.Enqueue(ctx, jobqueue.EnqueueInput{Type: "recover"})
+	_, _, err := repo.Enqueue(ctx, jobqueue.EnqueueInput{Type: "recover", RunAt: now})
 	if err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
@@ -146,7 +218,7 @@ func TestJobRepository_RetryAndDeadLetter(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 
-	job, _, _ := repo.Enqueue(ctx, jobqueue.EnqueueInput{Type: "flaky", MaxAttempts: 2})
+	job, _, _ := repo.Enqueue(ctx, jobqueue.EnqueueInput{Type: "flaky", MaxAttempts: 2, RunAt: now})
 	leased, _ := repo.Dequeue(ctx, jobqueue.DequeueParams{Type: "flaky", Limit: 1, Lease: time.Minute, Now: now})
 	if len(leased) != 1 {
 		t.Fatal("expected one leased job")
@@ -185,7 +257,7 @@ func TestJobRepository_HeartbeatExtendsLease(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 
-	job, _, _ := repo.Enqueue(ctx, jobqueue.EnqueueInput{Type: "long"})
+	job, _, _ := repo.Enqueue(ctx, jobqueue.EnqueueInput{Type: "long", RunAt: now})
 	leased, _ := repo.Dequeue(ctx, jobqueue.DequeueParams{Type: "long", Limit: 1, Lease: time.Second, Now: now})
 	if len(leased) != 1 {
 		t.Fatal("expected one leased job")

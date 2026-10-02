@@ -31,9 +31,13 @@ type VaultBalanceApplier interface {
 
 type TransactionService struct {
 	repository transaction.Repository
-	horizonURL  string
-	client      *http.Client
-	balance     VaultBalanceApplier
+	horizonURL string
+	client     *http.Client
+	balance    VaultBalanceApplier
+	// vaults resolves the vault a transaction belongs to, so a confirmation
+	// can be checked against the vault's real contract address and currency
+	// (nester#1145). See SetVaultLookup.
+	vaults TransactionVaultLookup
 }
 
 type RegisterTransactionInput struct {
@@ -51,6 +55,16 @@ func NewTransactionService(repository transaction.Repository, horizonURL string)
 		client: &http.Client{
 			Timeout: 10 * time.Second,
 		},
+	}
+}
+
+// SetHTTPClient replaces the HTTP client used to confirm transactions against
+// Horizon. It exists so startup can install the metrics-instrumented,
+// circuit-broken transport; a nil client is ignored so callers need not
+// branch.
+func (s *TransactionService) SetHTTPClient(client *http.Client) {
+	if client != nil {
+		s.client = client
 	}
 }
 
@@ -134,6 +148,29 @@ func (s *TransactionService) ReconcileTransaction(ctx context.Context, model tra
 
 	switch horizonStatus {
 	case transaction.StatusCompleted:
+		// A successful transaction proves only that something succeeded. Before
+		// crediting anything, confirm the transaction actually moved the
+		// claimed asset, in the claimed amount, to this vault's contract
+		// address, and replace the client-supplied amount with the on-chain one
+		// (nester#1145).
+		verified, reason, verifyErr := s.verifyConfirmedClaim(ctx, model)
+		if verifyErr != nil {
+			if errors.Is(verifyErr, transaction.ErrChainClaimMismatch) {
+				// The claim is false: mark the transaction failed with the
+				// typed reason and never touch the balance.
+				updated, updateErr := s.repository.UpdateStatus(ctx, model.TxHash, transaction.StatusFailed, confirmedAt, reason)
+				if updateErr != nil {
+					return model, false, updateErr
+				}
+				return updated, true, nil
+			}
+			// Transient (Horizon unavailable, vault not loadable): leave the
+			// transaction pending so the next poll retries rather than
+			// crediting on an unverified claim.
+			return model, false, verifyErr
+		}
+		model.Amount = verified.Amount
+
 		// Credit/debit the vault BEFORE marking the transaction completed.
 		// If the balance change fails, we return the error and leave the
 		// transaction pending so the next poll retries; the applier is
@@ -160,7 +197,7 @@ func (s *TransactionService) ReconcileTransaction(ctx context.Context, model tra
 }
 
 // applyConfirmedBalance moves the vault balance for a confirmed deposit or
-// withdrawal. It is a no-op for other transaction types (e.g. settlement) and
+// withdrawal. It is a no-op for other transaction types and
 // when no applier is configured.
 func (s *TransactionService) applyConfirmedBalance(ctx context.Context, model transaction.Transaction) error {
 	if s.balance == nil {
@@ -279,7 +316,7 @@ func (s *TransactionService) ListUserTransactions(ctx context.Context, input Lis
 
 func isSupportedTransactionType(value transaction.TransactionType) bool {
 	switch value {
-	case transaction.TypeDeposit, transaction.TypeWithdrawal, transaction.TypeSettlement:
+	case transaction.TypeDeposit, transaction.TypeWithdrawal:
 		return true
 	default:
 		return false
