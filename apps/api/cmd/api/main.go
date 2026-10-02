@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -43,6 +44,7 @@ import (
 	"github.com/suncrestlabs/nester/apps/api/internal/services"
 	stellarpkg "github.com/suncrestlabs/nester/apps/api/internal/stellar"
 	"github.com/suncrestlabs/nester/apps/api/internal/valuation"
+	"github.com/suncrestlabs/nester/apps/api/internal/vaultsnapshot"
 	"github.com/suncrestlabs/nester/apps/api/internal/ws"
 	logpkg "github.com/suncrestlabs/nester/apps/api/pkg/logger"
 )
@@ -697,6 +699,56 @@ func run() error {
 	costMonitorCtx, cancelCostMonitor := context.WithCancel(context.Background())
 	defer cancelCostMonitor()
 	go costMonitorJob.Run(costMonitorCtx)
+
+	// Signed vault-balance snapshots to cold storage (audit trail
+	// redundancy): periodically exports every vault's balance, signed, to
+	// storage independent of the primary database — see
+	// internal/vaultsnapshot's package doc. Disabled unless both a signing
+	// key and an export directory are configured, so a bare deployment
+	// doesn't silently start writing unsigned or misconfigured snapshots.
+	vaultSnapshotSigningKey := []byte(os.Getenv("VAULT_SNAPSHOT_SIGNING_KEY"))
+	vaultSnapshotDir := os.Getenv("VAULT_SNAPSHOT_DIR")
+	vaultSnapshotEnabled := len(vaultSnapshotSigningKey) > 0 && vaultSnapshotDir != ""
+	if v := os.Getenv("VAULT_SNAPSHOT_ENABLED"); v != "" {
+		vaultSnapshotEnabled = v == "true"
+	}
+	vaultSnapshotInterval := time.Hour
+	if v := os.Getenv("VAULT_SNAPSHOT_INTERVAL_MINUTES"); v != "" {
+		if mins, err := strconv.Atoi(v); err == nil && mins > 0 {
+			vaultSnapshotInterval = time.Duration(mins) * time.Minute
+		}
+	}
+	vaultSnapshotFetcher := vaultsnapshot.FetcherFunc(func(ctx context.Context) ([]vaultsnapshot.VaultBalance, error) {
+		vaults, err := vaultRepository.ListActive(ctx)
+		if err != nil {
+			return nil, err
+		}
+		balances := make([]vaultsnapshot.VaultBalance, len(vaults))
+		for i, v := range vaults {
+			balances[i] = vaultsnapshot.VaultBalance{
+				VaultID:         v.ID,
+				ContractAddress: v.ContractAddress,
+				Currency:        v.Currency,
+				TotalDeposited:  v.TotalDeposited,
+				CurrentBalance:  v.CurrentBalance,
+				YieldEarned:     v.YieldEarned,
+				FeesPaid:        v.FeesPaid,
+				Status:          string(v.Status),
+			}
+		}
+		return balances, nil
+	})
+	vaultSnapshotJob := vaultsnapshot.NewJob(
+		vaultsnapshot.Config{Enabled: vaultSnapshotEnabled, Interval: vaultSnapshotInterval},
+		vaultSnapshotFetcher,
+		vaultSnapshotSigningKey,
+		vaultsnapshot.LocalExporter{Dir: vaultSnapshotDir},
+		baseLogger.WithGroup("vaultsnapshot"),
+	)
+	vaultSnapshotJob.SetLeaderChecker(schedulerLeadership)
+	vaultSnapshotCtx, cancelVaultSnapshot := context.WithCancel(context.Background())
+	defer cancelVaultSnapshot()
+	go vaultSnapshotJob.Run(vaultSnapshotCtx)
 
 	// User watchlist
 	watchlistSvc := service.NewWatchlistService(db)
