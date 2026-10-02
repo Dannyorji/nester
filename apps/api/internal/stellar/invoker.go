@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -18,6 +19,8 @@ import (
 	"github.com/stellar/go/strkey"
 	"github.com/stellar/go/txnbuild"
 	"github.com/stellar/go/xdr"
+
+	"github.com/suncrestlabs/nester/apps/api/internal/costmonitor"
 )
 
 var (
@@ -77,6 +80,31 @@ func (c *ContractInvoker) WithSubmissionPipeline(pipeline *SubmissionPipeline) *
 func (c *ContractInvoker) WithRetryPolicy(policy RetryPolicy) *ContractInvoker {
 	c.retryPolicy = policy
 	return c
+}
+
+// WithUsageTracking records one call per request this invoker makes —
+// Soroban RPC and Horizon alike, labeled separately by inspecting each
+// request's host — against tracker, so mainnet-scale RPC volume growth
+// shows up in costmonitor's daily budgets instead of only on an invoice.
+// Recording is fire-and-forget (see costmonitor.Tracker.RecordCallAsync):
+// it never adds latency to, or a new failure mode for, an actual RPC call.
+func (c *ContractInvoker) WithUsageTracking(tracker *costmonitor.Tracker) *ContractInvoker {
+	horizonHost := hostOf(c.horizonURL)
+	c.httpClient.Transport = costmonitor.WrapTransportFunc(tracker, "stellar_rpc", func(req *http.Request) string {
+		if req.URL.Host == horizonHost {
+			return "horizon"
+		}
+		return "soroban_rpc"
+	}, c.httpClient.Transport)
+	return c
+}
+
+func hostOf(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return u.Host
 }
 
 // InvokeVoidFunction calls a contract function with signature (caller: Address).

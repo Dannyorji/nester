@@ -7,6 +7,7 @@ import (
 
 	"github.com/stellar/go/xdr"
 
+	"github.com/suncrestlabs/nester/apps/api/internal/costmonitor"
 	"github.com/suncrestlabs/nester/apps/api/internal/stellar"
 )
 
@@ -36,6 +37,13 @@ func NewSorobanVaultChainInvoker(
 // emergency-withdraw-all) — see stellar.ContractInvoker.WithSubmissionPipeline.
 func (s *SorobanVaultChainInvoker) WithSubmissionPipeline(pipeline *stellar.SubmissionPipeline) *SorobanVaultChainInvoker {
 	s.invoker.WithSubmissionPipeline(pipeline)
+	return s
+}
+
+// WithUsageTracking records Soroban RPC/Horizon call volume against tracker
+// — see stellar.ContractInvoker.WithUsageTracking.
+func (s *SorobanVaultChainInvoker) WithUsageTracking(tracker *costmonitor.Tracker) *SorobanVaultChainInvoker {
+	s.invoker.WithUsageTracking(tracker)
 	return s
 }
 

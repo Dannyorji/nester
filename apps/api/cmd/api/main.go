@@ -23,6 +23,7 @@ import (
 	_ "github.com/golang-migrate/migrate/v4/source/file"
 	"github.com/suncrestlabs/nester/apps/api/internal/auth"
 	"github.com/suncrestlabs/nester/apps/api/internal/config"
+	"github.com/suncrestlabs/nester/apps/api/internal/costmonitor"
 	cryptopkg "github.com/suncrestlabs/nester/apps/api/internal/crypto"
 	"github.com/suncrestlabs/nester/apps/api/internal/domain/jobqueue"
 	"github.com/suncrestlabs/nester/apps/api/internal/domain/nudge"
@@ -199,6 +200,21 @@ func run() error {
 	adminRepository := postgres.NewAdminRepository(db)
 	goalTemplateRepo := postgres.NewGoalTemplateRepository(db)
 
+	// Mainnet-scale RPC/API call-volume monitoring (#cost-monitoring): counts
+	// outbound calls per (category, provider) per day in Redis and alerts
+	// when a configured COST_BUDGETS limit is crossed, so unexpected volume
+	// growth is caught from inside the app rather than on an invoice. A nil
+	// client (no REDIS_ADDR) or unset COST_BUDGETS both degrade to a
+	// complete no-op — see internal/costmonitor's package doc. Its own
+	// *redis.Client, separate from the shared one constructed below for the
+	// challenge store/rate limiters, purely so this doesn't have to move
+	// ahead of where this block needs it wired into the chain invoker.
+	var costMonitorRedis *redis.Client
+	if addr := cfg.Redis().Addr(); addr != "" {
+		costMonitorRedis = redis.NewClient(&redis.Options{Addr: addr})
+	}
+	costMonitorTracker := costmonitor.NewTracker(costMonitorRedis, baseLogger.WithGroup("costmonitor"))
+
 	var chainInvoker service.VaultChainInvoker
 	if secret := cfg.Stellar().OperatorSecret(); secret != "" {
 		inv, err := service.NewSorobanVaultChainInvoker(
@@ -219,6 +235,7 @@ func run() error {
 		// transaction (see internal/stellar/retry_policy.go).
 		submissionPipeline := stellarpkg.NewSubmissionPipeline(db).WithRPC(cfg.Stellar().RPCURL(), cfg.Stellar().HorizonURL())
 		inv.WithSubmissionPipeline(submissionPipeline)
+		inv.WithUsageTracking(costMonitorTracker)
 
 		go func() {
 			recoverCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -665,6 +682,21 @@ func run() error {
 	apyDeviationCtx, cancelAPYDeviation := context.WithCancel(context.Background())
 	defer cancelAPYDeviation()
 	go apyDeviationJob.Run(apyDeviationCtx)
+
+	// Mainnet cost/budget alerting: disabled unless COST_BUDGETS is set (or
+	// COST_MONITOR_ENABLED=true) — see internal/costmonitor's package doc
+	// and costMonitorTracker's wiring above.
+	costMonitorCfg, costMonitorCfgErrs := costmonitor.FromEnv()
+	for _, cfgErr := range costMonitorCfgErrs {
+		baseLogger.Warn("costmonitor: config error", "error", cfgErr)
+	}
+	costMonitorAlerter := costmonitor.NewWebhookAlerter(os.Getenv("COST_ALERT_WEBHOOK_URL"))
+	costMonitorChecker := costmonitor.NewBudgetChecker(costMonitorCfg, costMonitorTracker, costMonitorAlerter)
+	costMonitorJob := costmonitor.NewJob(costMonitorCfg, costMonitorChecker, baseLogger.WithGroup("costmonitor"))
+	costMonitorJob.SetLeaderChecker(schedulerLeadership)
+	costMonitorCtx, cancelCostMonitor := context.WithCancel(context.Background())
+	defer cancelCostMonitor()
+	go costMonitorJob.Run(costMonitorCtx)
 
 	// User watchlist
 	watchlistSvc := service.NewWatchlistService(db)
